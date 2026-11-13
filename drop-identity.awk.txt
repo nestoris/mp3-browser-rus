@@ -1,0 +1,8 @@
+# прямо в файл-копию
+awk -f drop-identity.awk translations.txt > translations.filtered.txt
+
+# схлопнуть все подряд идущие пустые строки в одну (страховка)
+awk -f drop-identity.awk -v squeeze=1 translations.txt > translations.filtered.txt
+
+# заменить на месте (через временный файл)
+tmp=$(mktemp) && awk -f drop-identity.awk translations.txt > "$tmp" && mv "$tmp" translations.txt

@@ -1,0 +1,157 @@
+Перетаскивается: 
+Dragging: 
+
+…и ещё 
+…and 
+ more
+
+Нет плейлистов
+No playlists
+
+(нет плейлистов)
+(no playlists)
+
+Настройки…
+Settings…
+
+Выход
+Quit
+
+Файл
+File
+
+Фильтр
+Filter
+
+Файлы
+Files
+
+Проиграть выделенные
+Play selected
+
+Добавить в очередь
+Add to queue
+
+Добавить в плейлист
+Add to playlist
+
+Проиграть всё (
+Play all (
+
+Добавить всё в очередь (
+Add all to queue (
+
+Добавить всё в плейлист
+Add all to playlist
+
+Обновить
+Refresh
+
+Экспорт плейлиста
+Export playlist
+
+Отмена
+Cancel
+
+Сохранить
+Save
+
+Переименовать плейлист
+Rename playlist
+
+ОК
+OK
+
+Новый плейлист
+New playlist
+
+Настройки
+Settings
+
+Корневые каталоги (через ;):
+Root directories (separated by ;):
+
+Например: /home/user/Music;/mnt/usb/Music
+For example: /home/user/Music;/mnt/usb/Music
+
+Команда проигрывания (Play):
+Playback command (Play):
+
+Используйте %f как подстановку пути к файлу
+Use %f as a placeholder for the file path
+
+Команда добавления в очередь (Enqueue):
+Enqueue command (Enqueue):
+
+Использовать M3U для множественного выбора
+Use M3U for multiple selection
+
+Максимум файлов в подкаталоге:
+Maximum files in a subdirectory:
+
+Если файлов больше, показывается только сам каталог
+If there are more files, only the directory itself is shown
+
+Логировать каждые N каталогов:
+Log every N directories:
+
+Для scan.log
+For scan.log
+
+Настройки сохранены.
+Settings saved.
+
+Готово
+Done
+
+Готово: 
+Done: 
+
+Загружено из кэша: 
+Loaded from cache: 
+
+Сканирование каталогов: 
+Scanning directories: 
+
+Сканирование: 
+Scanning: 
+
+ файлов, 
+ files, 
+
+Ошибка: 
+Error: 
+
+Ошибка чтения тегов
+Error reading tags
+
+Некоторые каталоги превышают лимит в 
+Some directories exceed the limit of 
+
+ файлов — показаны только они сами
+ files — only they are shown
+
+ файлов выбрано
+ files selected
+
+Чтение ID3: 
+Reading ID3: 
+
+Ошибка загрузки темы в редактор: 
+Error loading theme into the editor: 
+
+нет команды Play: 
+no Play command: 
+
+нет команды Enqueue: 
+no Enqueue command: 
+
+Ошибка: 
+Error: 
+
+Не удалось прочитать: 
+Failed to read: 
+
+Не удалось прочитать 
+Failed to read 
+
