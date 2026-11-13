@@ -155,3 +155,62 @@ Failed to read:
 Не удалось прочитать 
 Failed to read 
 
+Имя
+Name
+
+Путь
+Path
+
+Дата
+Date
+
+Жанр
+Genre
+
+Исполнитель
+Artist
+
+Альбом
+Album
+
+Добавить
+Add
+
+Удалить
+Remove
+
+Вверх
+Up
+
+Вниз
+Down
+
+Удалить из плейлиста
+Remove from playlist
+
+Проиграть
+Play
+
+Добавить в очередь выделенные (${tracks.length})
+Add selected items to the queue (${tracks.length})
+
+Добавить выделенные в плейлист (${tracks.length})
+Add selected items to the playlist (${tracks.length})
+
+Удалить выделенные (${tracks.length})
+Remove selected items (${tracks.length})
+
+Проиграть (${files.length})
+Play (${files.length})
+
+Экспорт в M3U8...
+Export to M3U8...
+
+Переименовать
+Rename
+
+Поднять выше
+Move up
+
+Опустить ниже
+Move down
