@@ -7,6 +7,7 @@ imports.gi.versions.Gio = '2.0';
 const Gio = imports.gi.Gio;
 const GLib = imports.gi.GLib;
 const System = imports.system;
+const ByteArray = imports.byteArray;
 
 Gio._promisify(Gio.File.prototype, 'enumerate_children_async');
 Gio._promisify(Gio.FileEnumerator.prototype, 'next_files_async');
@@ -717,19 +718,40 @@ if (isMain && typeof ARGV !== 'undefined' && ARGV.length > 0) {
         try {
             const [ok, data] = GLib.file_get_contents(inFile);
             if (!ok) throw new Error('Could not read ' + inFile);
-            const tree = JSON.parse(data);
+            
+            // Используем ByteArray.toString() для корректного чтения JSON в GJS
+            const tree = JSON.parse(ByteArray.toString(data));
             const rootDir = GLib.path_get_dirname(GLib.canonicalize_filename(inFile, GLib.get_current_dir()));
             if (!outFile) outFile = GLib.build_filenamev([rootDir, 'mp3-tag-cache.json']);
             
             const tagCache = {};
-            print(`Applying tags (this may take a while)...`);
+            
+            // Считаем общее количество файлов для прогресс-бара
+            let totalFiles = 0;
+            function countFiles(node) {
+                if (Array.isArray(node)) totalFiles += node.length;
+                else if (node && typeof node === 'object') {
+                    for (const k in node) countFiles(node[k]);
+                }
+            }
+            countFiles(tree);
+            
+            let processedFiles = 0;
+            print(`Applying tags to ${totalFiles} files (this may take a while)...`);
             
             function processNode(node) {
                 if (Array.isArray(node)) {
                     for (const item of node) {
                         const rel = typeof item === 'string' ? item : item.path;
                         const abs = getAbsolutePath(rootDir, rel);
+                        
                         tagCache[rel] = readTags(abs);
+                        
+                        processedFiles++;
+                        // Выводим прогресс каждые 500 файлов и в самом конце
+                        if (processedFiles % 500 === 0 || processedFiles === totalFiles) {
+                            print(`  Прочитано ${processedFiles} из ${totalFiles}...`);
+                        }
                     }
                 } else if (node && typeof node === 'object') {
                     for (const k in node) processNode(node[k]);
@@ -743,7 +765,7 @@ if (isMain && typeof ARGV !== 'undefined' && ARGV.length > 0) {
             log('error', e.message);
             System.exit(1);
         }
-    } 
+    }
     else if (command === 'cache') {
         const root = ARGV[1];
         if (!root) { print('Usage: gjs mp3-scanner.js cache <dir>'); System.exit(1); }
