@@ -682,12 +682,24 @@ if (isMain && typeof ARGV !== 'undefined' && ARGV.length > 0) {
         const outFile = ARGV[2] || 'tree.json';
         if (!root) { print('Usage: gjs mp3-scanner.js scan <dir> [out.json]'); System.exit(1); }
         
+        const absRoot = GLib.canonicalize_filename(root, GLib.get_current_dir());
         const loop = new GLib.MainLoop(null, false);
-        print(`Scanning ${root}...`);
-        scanDirectory(root, (count) => { if (count % 100 === 0) print(`  ...${count} files`); })
+        print(`Scanning ${absRoot}...`);
+        
+        scanDirectory(absRoot, (count) => { if (count % 100 === 0) print(`  ...${count} files`); })
             .then(tree => {
-                GLib.file_set_contents(outFile, JSON.stringify(tree, null, 2));
-                print(`Done. Saved to ${outFile}`);
+                function toRelative(node) {
+                    if (Array.isArray(node)) return node.map(f => getRelativePath(absRoot, f));
+                    if (node && typeof node === 'object') {
+                        const out = {};
+                        for (const k in node) out[k] = toRelative(node[k]);
+                        return out;
+                    }
+                    return node;
+                }
+                const relTree = toRelative(tree);
+                GLib.file_set_contents(outFile, JSON.stringify(relTree, null, 2));
+                print(`Done. Saved to ${outFile} (relative paths)`);
                 loop.quit();
             })
             .catch(e => {
@@ -698,7 +710,7 @@ if (isMain && typeof ARGV !== 'undefined' && ARGV.length > 0) {
     } 
     else if (command === 'tags') {
         const inFile = ARGV[1];
-        const outFile = ARGV[2] || 'tags.json';
+        let outFile = ARGV[2];
         if (!inFile) { print('Usage: gjs mp3-scanner.js tags <in.json> [out.json]'); System.exit(1); }
         
         print(`Reading ${inFile}...`);
@@ -706,12 +718,27 @@ if (isMain && typeof ARGV !== 'undefined' && ARGV.length > 0) {
             const [ok, data] = GLib.file_get_contents(inFile);
             if (!ok) throw new Error('Could not read ' + inFile);
             const tree = JSON.parse(data);
+            const rootDir = GLib.path_get_dirname(GLib.canonicalize_filename(inFile, GLib.get_current_dir()));
+            if (!outFile) outFile = GLib.build_filenamev([rootDir, 'mp3-tag-cache.json']);
             
+            const tagCache = {};
             print(`Applying tags (this may take a while)...`);
-            const result = applyTagsToTree(tree);
             
-            GLib.file_set_contents(outFile, JSON.stringify(result, null, 2));
-            print(`Done. Saved to ${outFile}`);
+            function processNode(node) {
+                if (Array.isArray(node)) {
+                    for (const item of node) {
+                        const rel = typeof item === 'string' ? item : item.path;
+                        const abs = getAbsolutePath(rootDir, rel);
+                        tagCache[rel] = readTags(abs);
+                    }
+                } else if (node && typeof node === 'object') {
+                    for (const k in node) processNode(node[k]);
+                }
+            }
+            processNode(tree);
+            
+            GLib.file_set_contents(outFile, JSON.stringify(tagCache, null, 2));
+            print(`Done. Saved to ${outFile} (relative paths)`);
         } catch (e) {
             log('error', e.message);
             System.exit(1);
@@ -727,7 +754,16 @@ if (isMain && typeof ARGV !== 'undefined' && ARGV.length > 0) {
         
         scanDirectory(absRoot, (count) => { if (count % 100 === 0) print(`  ...${count} files`); })
             .then(tree => {
-                const relTree = treeToRelative(tree, absRoot);
+                function toRelative(node) {
+                    if (Array.isArray(node)) return node.map(f => getRelativePath(absRoot, f));
+                    if (node && typeof node === 'object') {
+                        const out = {};
+                        for (const k in node) out[k] = toRelative(node[k]);
+                        return out;
+                    }
+                    return node;
+                }
+                const relTree = toRelative(tree);
                 const fileCache = GLib.build_filenamev([absRoot, 'mp3-file-cache.json']);
                 GLib.file_set_contents(fileCache, JSON.stringify(relTree, null, 2));
                 print(`Saved: ${fileCache}`);
@@ -743,15 +779,15 @@ if (isMain && typeof ARGV !== 'undefined' && ARGV.length > 0) {
                     }
                     return [];
                 }
-                const allPaths = extractPaths(tree);
+                const allPaths = extractPaths(relTree);
                 let tIdx = 0;
                 
                 const readTagsIdle = () => {
                     const start = Date.now();
                     while (tIdx < allPaths.length) {
-                        const p = allPaths[tIdx];
-                        const rel = getRelativePath(absRoot, p);
-                        tagCache[rel] = readTags(p);
+                        const rel = allPaths[tIdx];
+                        const abs = getAbsolutePath(absRoot, rel);
+                        tagCache[rel] = readTags(abs);
                         tIdx++;
                         if (Date.now() - start > 100) break;
                     }
