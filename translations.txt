@@ -214,3 +214,6 @@ Move up
 
 Опустить ниже
 Move down
+
+  Прочитано ${processedFiles} из ${totalFiles}...
+  Read ${processedFiles} out of ${totalFiles}...
