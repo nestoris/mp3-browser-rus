@@ -507,7 +507,18 @@ function scheduleTagCacheSave() {
 
 function saveTagCache() {
     if (!tagCachePath) return;
-    try { GLib.file_set_contents(tagCachePath, JSON.stringify(DISK_TAG_CACHE, null, 2)); } catch(e) {}
+    let out = {};
+    if (tagCachePath.includes(CACHE_DIR)) {
+        // Глобальный кэш — сохраняем с абсолютными путями
+        for (const rel in DISK_TAG_CACHE) {
+            const abs = getAbsolutePath(activeRootPath, rel);
+            out[abs] = DISK_TAG_CACHE[rel];
+        }
+    } else {
+        // Локальный кэш — относительные пути как есть
+        out = DISK_TAG_CACHE;
+    }
+    try { GLib.file_set_contents(tagCachePath, JSON.stringify(out, null, 2)); } catch(e) {}
 }
 
 function getTagsCached(absPath) {
@@ -752,12 +763,26 @@ async function startScan(rootPath) {
     isRootWritable = checkWriteAccess(activeRootPath);
     const md5 = GLib.compute_checksum_for_string(GLib.ChecksumType.MD5, activeRootPath, -1);
     
-    if (isRootWritable) {
-        fileCachePath = GLib.build_filenamev([activeRootPath, 'mp3-file-cache.json']);
-        tagCachePath  = GLib.build_filenamev([activeRootPath, 'mp3-tag-cache.json']);
+    const localCachePath = GLib.build_filenamev([activeRootPath, 'mp3-file-cache.json']);
+    const localTagPath   = GLib.build_filenamev([activeRootPath, 'mp3-tag-cache.json']);
+    const globalCachePath = GLib.build_filenamev([CACHE_DIR, `${md5}-mp3-file-cache.json`]);
+    const globalTagPath   = GLib.build_filenamev([CACHE_DIR, `${md5}-mp3-tag-cache.json`]);
+
+    // Приоритет загрузки: сначала локальный файл, потом глобальный, иначе выбор по правам записи
+    if (GLib.file_test(localCachePath, GLib.FileTest.EXISTS)) {
+        fileCachePath = localCachePath;
+    } else if (GLib.file_test(globalCachePath, GLib.FileTest.EXISTS)) {
+        fileCachePath = globalCachePath;
     } else {
-        fileCachePath = GLib.build_filenamev([CACHE_DIR, `${md5}-mp3-file-cache.json`]);
-        tagCachePath  = GLib.build_filenamev([CACHE_DIR, `${md5}-mp3-tag-cache.json`]);
+        fileCachePath = isRootWritable ? localCachePath : globalCachePath;
+    }
+
+    if (GLib.file_test(localTagPath, GLib.FileTest.EXISTS)) {
+        tagCachePath = localTagPath;
+    } else if (GLib.file_test(globalTagPath, GLib.FileTest.EXISTS)) {
+        tagCachePath = globalTagPath;
+    } else {
+        tagCachePath = isRootWritable ? localTagPath : globalTagPath;
     }
 
     // Загрузка кэша тегов
@@ -765,7 +790,18 @@ async function startScan(rootPath) {
     if (GLib.file_test(tagCachePath, GLib.FileTest.EXISTS)) {
         try {
             const [ok, data] = GLib.file_get_contents(tagCachePath);
-            if (ok) DISK_TAG_CACHE = JSON.parse(ByteArray.toString(data));
+            if (ok) {
+                const raw = JSON.parse(ByteArray.toString(data));
+                if (tagCachePath === globalTagPath) {
+                    // Если это глобальный кэш, там абсолютные пути. Переводим в относительные.
+                    for (const abs in raw) {
+                        const rel = getRelativePath(activeRootPath, abs);
+                        DISK_TAG_CACHE[rel] = raw[abs];
+                    }
+                } else {
+                    DISK_TAG_CACHE = raw;
+                }
+            }
         } catch(e) {}
     }
 
@@ -781,6 +817,15 @@ async function startScan(rootPath) {
             const [ok, data] = GLib.file_get_contents(fileCachePath);
             if (ok) {
                 treeData = JSON.parse(ByteArray.toString(data));
+                
+                // Если JSON содержит обёртку от `scan` ({ "Music": [...] }), разворачиваем её
+                if (treeData && typeof treeData === 'object' && !Array.isArray(treeData)) {
+                    const keys = Object.keys(treeData);
+                    if (keys.length === 1 && (keys[0] === GLib.path_get_basename(activeRootPath) || keys[0] === '.')) {
+                        treeData = treeData[keys[0]];
+                    }
+                }
+                
                 treeData = treeToAbsolute(treeData, activeRootPath);
                 loadedFromCache = true;
             }
@@ -805,8 +850,14 @@ async function startScan(rootPath) {
             scanLogClose();
 
             if (treeData) {
-                const relTree = treeToRelative(treeData, activeRootPath);
-                try { GLib.file_set_contents(fileCachePath, JSON.stringify(relTree, null, 2)); } catch(e) {}
+                if (fileCachePath === localCachePath) {
+                    // Локальный кэш — относительные пути
+                    const relTree = treeToRelative(treeData, activeRootPath);
+                    try { GLib.file_set_contents(fileCachePath, JSON.stringify(relTree, null, 2)); } catch(e) {}
+                } else {
+                    // Глобальный кэш — абсолютные пути
+                    try { GLib.file_set_contents(fileCachePath, JSON.stringify(treeData, null, 2)); } catch(e) {}
+                }
             }
         }
 
@@ -878,7 +929,6 @@ function renderFileList(files) {
         const t = f.tags || {};
         const it = fileListStore.append();
         f._iter = it; 
-        f._rowNum = n; 
         f._rowNum = n;
         fileListStore.set(it, [0,1,2,3,4,5,6,7,8],
             [t.Name || f.name.replace(/\.mp3$/i, ''), GLib.path_get_basename(f.path), GLib.path_get_dirname(f.path) + '/', t.Track ? String(t.Track) : String(n++),

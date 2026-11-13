@@ -686,8 +686,7 @@ if (isMain && typeof ARGV !== 'undefined' && ARGV.length > 0) {
         print(`Scanning ${root}...`);
         scanDirectory(root, (count) => { if (count % 100 === 0) print(`  ...${count} files`); })
             .then(tree => {
-                const out = { [GLib.path_get_basename(root)]: tree };
-                GLib.file_set_contents(outFile, JSON.stringify(out, null, 2));
+                GLib.file_set_contents(outFile, JSON.stringify(tree, null, 2));
                 print(`Done. Saved to ${outFile}`);
                 loop.quit();
             })
