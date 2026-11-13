@@ -830,6 +830,73 @@ if (isMain && typeof ARGV !== 'undefined' && ARGV.length > 0) {
             });
         loop.run();
     }
+        else if (command === 'apply') {
+        const inFile = ARGV[1];
+        let outFile = ARGV[2];
+        if (!inFile || !outFile) { print('Usage: gjs mp3-scanner.js apply <in.json> <out.json>'); System.exit(1); }
+
+        print(`Reading tree from ${inFile}...`);
+        try {
+            const [ok, data] = GLib.file_get_contents(inFile);
+            if (!ok) throw new Error('Could not read ' + inFile);
+            
+            // Читаем дерево (in.json)
+            const tree = JSON.parse(ByteArray.toString(data));
+            const rootDir = GLib.path_get_dirname(GLib.canonicalize_filename(inFile, GLib.get_current_dir()));
+
+            // Читаем существующий кэш тегов (out.json)
+            let tagCache = {};
+            if (GLib.file_test(outFile, GLib.FileTest.EXISTS)) {
+                print(`Reading existing tags from ${outFile}...`);
+                const [ok2, data2] = GLib.file_get_contents(outFile);
+                if (ok2) {
+                    try { tagCache = JSON.parse(ByteArray.toString(data2)); } catch(e) {}
+                }
+            }
+
+            const filesToRead = [];
+
+            // Ищем файлы, для которых ещё нет тегов
+            function processNode(node) {
+                if (Array.isArray(node)) {
+                    for (const item of node) {
+                        const rel = typeof item === 'string' ? item : item.path;
+                        if (tagCache[rel] === undefined) {
+                            filesToRead.push(rel);
+                        }
+                    }
+                } else if (node && typeof node === 'object') {
+                    for (const k in node) processNode(node[k]);
+                }
+            }
+            processNode(tree);
+
+            const total = filesToRead.length;
+            if (total === 0) {
+                print(`No new files found. Tag cache is up to date.`);
+                System.exit(0);
+            }
+
+            print(`Found ${total} new files. Reading ID3...`);
+            
+            let processed = 0;
+            for (const rel of filesToRead) {
+                const abs = getAbsolutePath(rootDir, rel);
+                tagCache[rel] = readTags(abs);
+                
+                processed++;
+                if (processed % 500 === 0 || processed === total) {
+                    print(`  Прочитано ${processed} из ${total}...`);
+                }
+            }
+
+            GLib.file_set_contents(outFile, JSON.stringify(tagCache, null, 2));
+            print(`Done. Updated ${outFile}`);
+        } catch (e) {
+            log('error', e.message);
+            System.exit(1);
+        }
+    }
     else if (command === '-h' || command === '--help') {
         print(`Usage: gjs mp3-scanner.js <command> [options]`);
         print(`Commands:`);
@@ -837,6 +904,7 @@ if (isMain && typeof ARGV !== 'undefined' && ARGV.length > 0) {
         print(`  scan <dir> [out.json]    - scan a directory and save its tree to a JSON file`);
         print(`  tags <in.json> [out.json]- read ID3 tags for all files in a tree JSON and save to another JSON`);
         print(`  cache <dir>              - scan a directory and create mp3-file-cache.json and mp3-tag-cache.json inside it`);
+        print(`  apply <in.json> <out.json> - add tags ONLY for new files in in.json that are missing in out.json`);
         System.exit(0);
     } else {
         print('Usage: gjs mp3-scanner.js <command> [options]');

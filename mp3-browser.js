@@ -118,6 +118,20 @@ function getSelectedTracks(treeView, model) {
     });
     return selected;
 }
+
+function getAllTracksFromFileList() {
+    const tracks = [];
+    fileListStore.foreach((model, path, iter) => {
+        if (!iter) return;
+        const name = fileListStore.get_value(iter, 0);
+        const file = fileListStore.get_value(iter, 1);
+        const dir  = fileListStore.get_value(iter, 2);
+        const fullPath = dir.endsWith('/') ? dir + file : dir + '/' + file;
+        tracks.push({ name, path: fullPath });
+    });
+    return tracks;
+}
+
 function setupSelectionBlocking(view) {
     let blockSelection = false;
     view.get_selection().set_select_function((sel, model, path, isSel) => !blockSelection);
@@ -1117,15 +1131,13 @@ treeView.connect('button-press-event', (w, event) => {
     if (!path) return false;
     const sel = w.get_selection();
     if (!sel.path_is_selected(path)) { sel.unselect_all(); sel.select_path(path); }
-    const nodes = [];
-    sel.selected_foreach((model, p, iter) => { const tcPath = model.get_value(iter, TC_PATH); const node = nodesByPath.get(tcPath); if (node) nodes.push(node); });
-    const files = [];
-    for (const n of nodes) collectFilesFromNode(n, files);
+    // Берем все файлы прямо из таблицы (в том порядке, в котором они отображаются)
+    const files = getAllTracksFromFileList();
     const menu = new Gtk.Menu();
     const miPlay = new Gtk.MenuItem({ label: `Проиграть всё (${files.length})` }); miPlay.set_sensitive(files.length > 0); miPlay.connect('activate', () => playTracks(files, false)); menu.append(miPlay);
     const miEnq = new Gtk.MenuItem({ label: `Добавить всё в очередь (${files.length})` }); miEnq.set_sensitive(files.length > 0); miEnq.connect('activate', () => playTracks(files, true)); menu.append(miEnq);
     menu.append(new Gtk.SeparatorMenuItem());
-    const miAdd = new Gtk.MenuItem({ label: 'Добавить всё в плейлист' }); miAdd.set_sensitive(files.length > 0); miAdd.set_submenu(buildAddToPlaylistSubmenu(files.map(f => ({ name: f.name, path: f.path })))); menu.append(miAdd);
+    const miAdd = new Gtk.MenuItem({ label: 'Добавить всё в плейлист' }); miAdd.set_sensitive(files.length > 0); miAdd.set_submenu(buildAddToPlaylistSubmenu(files)); menu.append(miAdd);
     menu.append(new Gtk.SeparatorMenuItem());
     const miRl = new Gtk.MenuItem({ label: 'Обновить' }); miRl.connect('activate', () => doReload()); menu.append(miRl);
     popupMenuAtPointer(menu); return true;
