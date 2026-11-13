@@ -11,7 +11,14 @@ const Gio       = imports.gi.Gio;
 const ByteArray = imports.byteArray;
 const System    = imports.system;
 
-imports.searchPath.unshift(GLib.get_current_dir());
+let scriptDir = GLib.get_current_dir();
+try {
+    let progPath = System.programPath || System.programInvocationName;
+    if (progPath && progPath.includes('/')) {
+        scriptDir = GLib.path_get_dirname(GLib.canonicalize_filename(progPath, GLib.get_current_dir()));
+    }
+} catch (e) {}
+imports.searchPath.unshift(scriptDir);
 const Scanner = imports['mp3-scanner'];
 
 let cliRoot = null;
