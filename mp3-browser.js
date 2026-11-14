@@ -217,7 +217,19 @@ function getMultipleM3U() { try { return keyfile.get_boolean('Player', 'Multiple
 function getMaxTrackCount() { try { return keyfile.get_integer('Scan', 'MaxTrackCount') || 20000; } catch (e) { return 20000; } }
 function getScanLogEvery() { try { return keyfile.get_integer('Scan', 'LogEvery') || 500; } catch (e) { return 500; } }
 
-let winConfig = { width: 900, height: 600, hpaned: 280, vpaned: 360, collection: 0, fileCols: null, playlistCols: null };
+let winConfig = {
+    width: 800, height: 600, hpaned: 248, vpaned: 338, collection: 0,
+    fileCols: {
+        order: ["№", "Имя", "Альбом", "Дата", "Исполнитель", "Жанр", "Файл", "Путь"],
+        widths: {"№": 50, "Имя": 346, "Альбом": 166, "Дата": 66, "Исполнитель": 132, "Жанр": 72, "Файл": 249, "Путь": 282},
+        sortId: 7, sortOrder: 0
+    },
+    playlistCols: {
+        order: ["Имя", "Файл", "Путь", "Дата", "Жанр", "Исполнитель", "Альбом", "№"],
+        widths: {"Имя": 58, "Файл": 69, "Путь": 65, "Дата": 66, "Жанр": 72, "Исполнитель": 132, "Альбом": 85, "№": 911},
+        sortId: -1, sortOrder: 0
+    }
+};
 try {
     if (GLib.file_test(WINDOW_FILE, GLib.FileTest.EXISTS)) {
         const [ok, data] = GLib.file_get_contents(WINDOW_FILE);
@@ -233,6 +245,24 @@ const TC_NAME = 0, TC_PATH = 1;
  *  Окно и Меню
  * ============================================================ */
 const win = new Gtk.Window({ title: 'MP3-Browser', default_width: winConfig.width, default_height: winConfig.height });
+// Системный трей
+let statusIcon = null;
+try {
+    statusIcon = new Gtk.StatusIcon();
+    statusIcon.set_from_icon_name('media-playback-start'); // Иконка (если нет в теме, будет использоваться стандартная)
+    statusIcon.set_tooltip_text('MP3-Browser');
+    statusIcon.set_visible(true);
+    statusIcon.connect('activate', () => {
+        if (win.get_visible()) {
+            win.hide();
+        } else {
+            win.show();
+            win.present();
+        }
+    });
+} catch (e) {
+    console.log("Gtk.StatusIcon не поддерживается вашей системой:", e.message);
+}
 win.connect('configure-event', (w, event) => {
     const [width, height] = w.get_size();
     if (width > 1 && height > 1) { winConfig.width = width; winConfig.height = height; }
@@ -242,7 +272,7 @@ win.connect('destroy', () => {
     winConfig.hpaned = hpaned.get_position(); winConfig.vpaned = vpaned.get_position();
     winConfig.collection = combo.get_active();
     winConfig.fileCols = getColumnConfig(fileListTree, fileListStore); winConfig.playlistCols = getColumnConfig(playlistContentTree, playlistContentStore);
-    try { GLib.file_set_contents(WINDOW_FILE, JSON.stringify(winConfig, null, 2)); } catch (e) {}
+    saveFileUtf8(WINDOW_FILE, JSON.stringify(winConfig, null, 2));
     savePlaylists(); 
     if (tagCacheSaveTimer) { GLib.source_remove(tagCacheSaveTimer); tagCacheSaveTimer = 0; }
     saveTagCache();
@@ -273,9 +303,12 @@ const comboRow = new Gtk.Box({ orientation: Gtk.Orientation.HORIZONTAL, spacing:
 comboRow.set_margin_start(4); comboRow.set_margin_end(4); comboRow.set_margin_top(4); comboRow.set_margin_bottom(4);
 const combo = new Gtk.ComboBoxText(); combo.set_hexpand(true);
 for (const p of ROOTS) combo.append_text(p);
-const reloadBtn = new Gtk.Button();
+const reloadBtn = new Gtk.Button({ relief: Gtk.ReliefStyle.NONE, tooltip_text: 'Перечитать (только новые файлы). SHIFT+клик — перечитать все теги.' });
 reloadBtn.add(new Gtk.Image({ icon_name: 'view-refresh', icon_size: Gtk.IconSize.BUTTON }));
-reloadBtn.connect('clicked', () => doReload());
+reloadBtn.connect('clicked', () => {
+    if (isShiftPressed()) doForceReload();
+    else doReload();
+});
 comboRow.pack_start(combo, true, true, 0);
 comboRow.pack_start(reloadBtn, false, false, 0);
 vbox.pack_start(comboRow, false, false, 0);
@@ -342,6 +375,35 @@ treeCol.pack_start(treeRend, true); treeCol.add_attribute(treeRend, 'text', TC_N
 const treeScroll = new Gtk.ScrolledWindow(); treeScroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC);
 treeScroll.add(treeView); leftBox.pack_start(treeScroll, true, true, 0); hpaned.pack1(leftBox, false, false);
 
+// DnD: перетаскивание каталогов из дерева в плейлист
+const treeDragTargets = [Gtk.TargetEntry.new('text/plain', 0, 0)];
+treeView.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, treeDragTargets, Gdk.DragAction.COPY);
+treeView.connect('drag-begin', (w, ctx) => {
+    const names = [];
+    w.get_selection().selected_foreach((model, path, iter) => {
+        names.push(model.get_value(iter, TC_NAME));
+    });
+    try {
+        const icon = makeDragIcon(names);
+        Gtk.drag_set_icon_widget(ctx, icon, 0, 0);
+    } catch (e) {
+        try { Gtk.drag_set_icon_name(ctx, 'folder', 0, 0); } catch (e2) {}
+    }
+});
+treeView.connect('drag-data-get', (w, ctx, sel, info, time) => {
+    const tracks = [];
+    w.get_selection().selected_foreach((model, path, iter) => {
+        const tcPath = model.get_value(iter, TC_PATH);
+        const node = nodesByPath.get(tcPath);
+        if (node) {
+            const files = [];
+            collectFilesFromNode(node, files);
+            for (const f of files) tracks.push({ name: f.name, path: f.path });
+        }
+    });
+    if (tracks.length > 0) sel.set_text(JSON.stringify(tracks), -1);
+});
+
 const vpaned = new Gtk.Paned({ orientation: Gtk.Orientation.VERTICAL }); vpaned.set_position(winConfig.vpaned); hpaned.pack2(vpaned, true, false);
 
 /* ---- Верхняя таблица файлов ---- */
@@ -349,14 +411,41 @@ function trackNumberCompare(model, iter1, iter2, user_data) {
     const it1 = (Array.isArray(iter1) && iter1.length === 2) ? iter1[1] : iter1;
     const it2 = (Array.isArray(iter2) && iter2.length === 2) ? iter2[1] : iter2;
     if (!it1 || !it2) return 0;
-    const v1 = model.get_value(it1, 3) || ''; const v2 = model.get_value(it2, 3) || '';
+    const v1 = model.get_value(it1, 3) || '';
+    const v2 = model.get_value(it2, 3) || '';
+    if (v1 === '' && v2 === '') return 0;
+    if (v1 === '') return 1;
+    if (v2 === '') return -1;
     const n1 = parseInt(v1, 10); const n2 = parseInt(v2, 10);
     if (!isNaN(n1) && !isNaN(n2)) return n1 - n2;
     if (v1 < v2) return -1; if (v1 > v2) return 1; return 0;
 }
 
+function albumCompoundSort(model, iter1, iter2, user_data) {
+    const it1 = (Array.isArray(iter1) && iter1.length === 2) ? iter1[1] : iter1;
+    const it2 = (Array.isArray(iter2) && iter2.length === 2) ? iter2[1] : iter2;
+    if (!it1 || !it2) return 0;
+    const alb1 = model.get_value(it1, 7) || '';
+    const alb2 = model.get_value(it2, 7) || '';
+    const byAlbum = alb1.localeCompare(alb2);
+    if (byAlbum !== 0) return byAlbum;
+    const t1 = model.get_value(it1, 3) || '';
+    const t2 = model.get_value(it2, 3) || '';
+    if (t1 === '' && t2 === '') { /* fallthrough to title */ }
+    else if (t1 === '') return 1;
+    else if (t2 === '') return -1;
+    else {
+        const n1 = parseInt(t1, 10); const n2 = parseInt(t2, 10);
+        if (!isNaN(n1) && !isNaN(n2) && n1 !== n2) return n1 - n2;
+    }
+    const title1 = model.get_value(it1, 0) || '';
+    const title2 = model.get_value(it2, 0) || '';
+    return title1.localeCompare(title2);
+}
+
 const fileListStore = Gtk.ListStore.new([...FILE_COLS.map(() => GObject.TYPE_STRING), GObject.TYPE_STRING]);
 fileListStore.set_sort_func(3, trackNumberCompare);
+fileListStore.set_sort_func(7, albumCompoundSort);
 const fileListTree = new Gtk.TreeView({ model: fileListStore });
 FILE_COLS.forEach((title, idx) => {
     const col = new Gtk.TreeViewColumn({ title, sort_column_id: idx });
@@ -408,6 +497,7 @@ playlistsBox.pack_start(plBtnBox, false, false, 0); bottomPaned.pack1(playlistsB
 
 const playlistContentStore = Gtk.ListStore.new([...FILE_COLS.map(() => GObject.TYPE_STRING), GObject.TYPE_STRING]);
 playlistContentStore.set_sort_func(3, trackNumberCompare);
+playlistContentStore.set_sort_func(7, albumCompoundSort);
 const playlistContentTree = new Gtk.TreeView({ model: playlistContentStore });
 FILE_COLS.forEach((title, idx) => {
     const col = new Gtk.TreeViewColumn({ title, sort_column_id: idx });
@@ -470,6 +560,25 @@ let tagCachePath = '';
 let DISK_TAG_CACHE = {};
 let tagCacheSaveTimer = 0;
 
+function saveFileUtf8(path, content) {
+    try {
+        let text = content;
+        if (typeof text !== 'string') {
+            text = ByteArray.toString(text); // на случай, если пришёл Uint8Array
+        }
+        // Принудительно кодируем в UTF-8 через TextEncoder
+        if (typeof TextEncoder !== 'undefined') {
+            const bytes = new TextEncoder().encode(text);
+            GLib.file_set_contents(path, bytes);
+        } else {
+            // Запасной вариант для очень старых версий CJS
+            GLib.file_set_contents(path, text);
+        }
+    } catch (e) {
+        console.error(`Ошибка сохранения ${path}:`, e);
+    }
+}
+
 function checkWriteAccess(dir) {
     try {
         const file = Gio.File.new_for_path(dir);
@@ -484,6 +593,11 @@ function checkWriteAccess(dir) {
         } catch (e) {} // Игнорируем ошибки FS info
         return true;
     } catch (e) { return false; }
+}
+
+function getDefaultAction() {
+    try { return keyfile.get_string('Player', 'DefaultAction') || 'play'; }
+    catch (e) { return 'play'; }
 }
 
 function getRelativePath(root, abs) {
@@ -539,7 +653,7 @@ function saveTagCache() {
         // Локальный кэш — относительные пути как есть
         out = DISK_TAG_CACHE;
     }
-    try { GLib.file_set_contents(tagCachePath, JSON.stringify(out, null, 2)); } catch(e) {}
+    saveFileUtf8(tagCachePath, JSON.stringify(out, null, 2));
 }
 
 function getTagsCached(absPath) {
@@ -572,7 +686,7 @@ function savePlaylists() {
         obj[name] = (PLAYLIST_DATA.get(name) || []).map(f => ({ name: f.name, path: f.path }));
         iter = unwrapNext(playlistStore, iter);
     }
-    try { GLib.file_set_contents(PLAYLISTS_FILE, JSON.stringify(obj, null, 2)); } catch (e) {}
+    saveFileUtf8(PLAYLISTS_FILE, JSON.stringify(obj, null, 2));
 }
 function syncPlaylistData() {
     const [pmodel, piter] = getSelected(playlistTree.get_selection());
@@ -610,10 +724,9 @@ function renderPlaylistContent(files) {
             const rel = getRelativePath(activeRootPath, f.path);
             const t = DISK_TAG_CACHE[rel] || {};
             const it = playlistContentStore.append();
-            f._rowNum = n;
             playlistContentStore.set(it, [0,1,2,3,4,5,6,7,8],
                 [t.Name || f.name, GLib.path_get_basename(f.path), GLib.path_get_dirname(f.path) + '/', 
-                 t.Track ? String(t.Track) : String(n++),
+                 t.Track ? String(t.Track) : '',
                  t.Year || '', t.Genre || '', t.Artist || '', t.Album || '', f.path]);
         }
     } finally { syncingPlaylist = false; }
@@ -624,7 +737,7 @@ function updatePlaylistRow(f) {
     while (iter) {
         if (playlistContentStore.get_value(iter, 8) === f.path) {
             const t = f.tags || {};
-            const displayNum = t.Track ? String(t.Track) : String(f._rowNum);
+            const displayNum = t.Track ? String(t.Track) : '';
             syncingPlaylist = true;
             try {
                 playlistContentStore.set(iter, [0, 3, 4, 5, 6, 7],
@@ -949,16 +1062,14 @@ function renderFileList(files) {
     for (const f of files) {
         const t = f.tags || {};
         const it = fileListStore.append();
-        f._iter = it; 
-        f._rowNum = n;
         fileListStore.set(it, [0,1,2,3,4,5,6,7,8],
-            [t.Name || f.name.replace(/\.mp3$/i, ''), GLib.path_get_basename(f.path), GLib.path_get_dirname(f.path) + '/', t.Track ? String(t.Track) : String(n++),
+            [t.Name || f.name.replace(/\.mp3$/i, ''), GLib.path_get_basename(f.path), GLib.path_get_dirname(f.path) + '/', t.Track ? String(t.Track) : '',
              t.Year || '', t.Genre || '', t.Artist || '', t.Album || '', f.path]);
     }
     if (winConfig.fileCols && winConfig.fileCols.sortId >= 0) {
         try { fileListStore.set_sort_column_id(winConfig.fileCols.sortId, winConfig.fileCols.sortOrder); } catch (e) {}
     } else {
-        try { fileListStore.set_sort_column_id(3, Gtk.SortType.ASCENDING); } catch (e) {}
+        try { fileListStore.set_sort_column_id(7, Gtk.SortType.ASCENDING); } catch (e) {}
     }
 }
 
@@ -967,7 +1078,7 @@ function updateFileRow(f) {
     while (iter) {
         if (fileListStore.get_value(iter, 8) === f.path) {
             const t = f.tags || {};
-            const displayNum = t.Track ? String(t.Track) : String(f._rowNum);
+            const displayNum = t.Track ? String(t.Track) : '';
             fileListStore.set(iter, [0, 3, 4, 5, 6, 7],
                 [t.Name || f.name.replace(/\.mp3$/i, ''), displayNum,
                  t.Year || '', t.Genre || '', t.Artist || '', t.Album || '']);
@@ -1047,7 +1158,7 @@ function populateFileListFromNodes(nodes) {
                 progress.hide(); progress.set_no_show_all(true);
                 scheduleTagCacheSave();
                 renderFileList(allFiles); // Полная перерисовка с готовыми тегами
-                statusbar.push(1, `${allFiles.length} файлов выбрано`);
+                statusbar.push(1, `${allFiles.length} файлов показано`);
             }
         });
     }
@@ -1070,8 +1181,66 @@ function collectAllFiles(node) {
     }
     return out;
 }
+function isShiftPressed() {
+    try {
+        const event = Gtk.get_current_event();
+        if (!event) return false;
+        let state = 0;
+        if (typeof event.get_state === 'function') state = event.get_state();
+        else if (typeof event.get_modifier_state === 'function') state = event.get_modifier_state();
+        else if (typeof event.state === 'number') state = event.state;
+        return (state & Gdk.ModifierType.SHIFT_MASK) !== 0;
+    } catch (e) { return false; }
+}
+
 function doReload() {
+    // apply: удаляем только кэш дерева, теги сохраняются
     const idx = combo.get_active(); if (idx < 0) return;
+    if (isRootWritable) {
+        try { GLib.unlink(fileCachePath); } catch (e) {}
+    } else {
+        const md5 = GLib.compute_checksum_for_string(GLib.ChecksumType.MD5, ROOTS[idx], -1);
+        try { GLib.unlink(GLib.build_filenamev([CACHE_DIR, `${md5}-mp3-file-cache.json`])); } catch (e) {}
+    }
+    startScan(ROOTS[idx]);
+}
+
+function doForceReload() {
+    const idx = combo.get_active(); if (idx < 0) return;
+    // Считаем количество файлов
+    let totalFiles = 0;
+    for (const [, node] of nodesByPath) totalFiles += node.fileNames.length;
+    if (totalFiles === 0 && GLib.file_test(fileCachePath, GLib.FileTest.EXISTS)) {
+        try {
+            const [ok, data] = GLib.file_get_contents(fileCachePath);
+            if (ok) {
+                const tree = JSON.parse(ByteArray.toString(data));
+                (function count(n) {
+                    if (Array.isArray(n)) totalFiles += n.length;
+                    else if (n && typeof n === 'object') for (const k in n) count(n[k]);
+                })(tree);
+            }
+        } catch (e) {}
+    }
+    if (totalFiles > 1000) {
+        const dialog = new Gtk.MessageDialog({
+            transient_for: win, modal: true,
+            message_type: Gtk.MessageType.WARNING,
+            buttons: Gtk.ButtonsType.YES_NO,
+            text: `Перечитать ID3 всех файлов (${totalFiles})?`
+        });
+        dialog.format_secondary_text('Это может занять продолжительное время. Продолжить?');
+        dialog.connect('response', (d, resp) => {
+            d.destroy();
+            if (resp === Gtk.ResponseType.YES) _doForceReloadImpl(idx);
+        });
+        dialog.show_all();
+        return;
+    }
+    _doForceReloadImpl(idx);
+}
+
+function _doForceReloadImpl(idx) {
     if (isRootWritable) {
         try { GLib.unlink(fileCachePath); } catch (e) {}
         try { GLib.unlink(tagCachePath); } catch (e) {}
@@ -1081,7 +1250,56 @@ function doReload() {
         try { GLib.unlink(GLib.build_filenamev([CACHE_DIR, `${md5}-mp3-tag-cache.json`])); } catch (e) {}
     }
     DISK_TAG_CACHE = {};
-    startScan(ROOTS[idx]);
+    startScan(ROOTS[idx]).then(() => readAllTagsAsync()).catch(e => console.error(e));
+}
+
+function readAllTagsAsync() {
+    const allFiles = [];
+    for (const [, node] of nodesByPath) {
+        for (const f of node.fileNames) {
+            const rel = getRelativePath(activeRootPath, f.path);
+            if (DISK_TAG_CACHE[rel] === undefined) allFiles.push(f);
+        }
+    }
+    if (allFiles.length === 0) { statusbar.push(1, 'Все теги уже прочитаны'); return; }
+
+    const total = allFiles.length;
+    let completed = 0, nextToStart = 0, inFlight = 0;
+    const MAX_CONCURRENT = 20;
+    progress.set_no_show_all(false); progress.show(); progress.set_fraction(0);
+    statusbar.push(1, `Чтение ID3: 0/${total}`);
+
+    function startMore() {
+        while (inFlight < MAX_CONCURRENT && nextToStart < total) {
+            const f = allFiles[nextToStart++];
+            inFlight++;
+            Gio.File.new_for_path(f.path).load_contents_async(null, (src, res) => {
+                inFlight--;
+                const rel = getRelativePath(activeRootPath, f.path);
+                try {
+                    const [ok, contents] = src.load_contents_finish(res);
+                    if (ok) {
+                        f.tags = Scanner.parseTagsFromBytes(new Uint8Array(contents)) || {};
+                    } else f.tags = {};
+                } catch (e) { f.tags = {}; }
+                DISK_TAG_CACHE[rel] = f.tags;
+                completed++;
+                if (completed % 100 === 0 || completed === total) {
+                    progress.set_fraction(completed / total);
+                    statusbar.push(1, `Чтение ID3: ${completed}/${total}`);
+                }
+                if (completed === total) {
+                    progress.hide(); progress.set_no_show_all(true);
+                    scheduleTagCacheSave();
+                    statusbar.push(1, `Прочитано ${total} тегов`);
+                    refreshFileListFromSelection();
+                } else {
+                    startMore();
+                }
+            });
+        }
+    }
+    startMore();
 }
 
 /* ============================================================
@@ -1089,18 +1307,26 @@ function doReload() {
  * ============================================================ */
 treeView.get_selection().connect('changed', () => { refreshFileListFromSelection(); });
 
-fileListTree.connect('row-activated', (w, path) => { const tracks = getSelectedTracks(w, fileListStore); if (tracks.length > 0) playTracks(tracks, false); });
+fileListTree.connect('row-activated', (w, path) => {
+    const tracks = getSelectedTracks(w, fileListStore);
+    if (tracks.length > 0) playTracks(tracks, getDefaultAction() === 'enqueue');
+});
 fileListTree.connect('key-press-event', (w, event) => {
     if (evtKeyval(event) === Gdk.KEY_Return || evtKeyval(event) === Gdk.KEY_KP_Enter) {
-        const tracks = getSelectedTracks(w, fileListStore); if (tracks.length > 0) { playTracks(tracks, false); return true; }
+        const tracks = getSelectedTracks(w, fileListStore);
+        if (tracks.length > 0) { playTracks(tracks, getDefaultAction() === 'enqueue'); return true; }
     }
     return false;
 });
 
-playlistContentTree.connect('row-activated', (w, path) => { const tracks = getSelectedTracks(w, playlistContentStore); if (tracks.length > 0) playTracks(tracks, false); });
+playlistContentTree.connect('row-activated', (w, path) => {
+    const tracks = getSelectedTracks(w, playlistContentStore);
+    if (tracks.length > 0) playTracks(tracks, getDefaultAction() === 'enqueue');
+});
 playlistContentTree.connect('key-press-event', (w, event) => {
     if (evtKeyval(event) === Gdk.KEY_Return || evtKeyval(event) === Gdk.KEY_KP_Enter) {
-        const tracks = getSelectedTracks(w, playlistContentStore); if (tracks.length > 0) { playTracks(tracks, false); return true; }
+        const tracks = getSelectedTracks(w, playlistContentStore);
+        if (tracks.length > 0) { playTracks(tracks, getDefaultAction() === 'enqueue'); return true; }
     }
     return false;
 });
@@ -1316,6 +1542,14 @@ function openSettingsDialog() {
 
     const chkM3U = new Gtk.CheckButton({ label: 'Использовать M3U для множественного выбора', active: getMultipleM3U() });
     grid.attach(chkM3U, 0, row, 2, 1); row++;
+        const lblAction = new Gtk.Label({ label: 'Действие Enter / двойной клик:', xalign: 0, halign: Gtk.Align.START });
+    const comboAction = new Gtk.ComboBoxText();
+    comboAction.append_text('Проиграть');
+    comboAction.append_text('Добавить в очередь');
+    comboAction.set_active(getDefaultAction() === 'enqueue' ? 1 : 0);
+    grid.attach(lblAction, 0, row, 1, 1);
+    grid.attach(comboAction, 1, row, 1, 1);
+    row++;
     addRow('Максимум файлов в подкаталоге:', 'MaxTrackCount', String(getMaxTrackCount()), 'Если файлов больше, показывается только сам каталог');
     addRow('Логировать каждые N каталогов:', 'LogEvery', String(getScanLogEvery()), 'Для scan.log');
 
@@ -1326,10 +1560,11 @@ function openSettingsDialog() {
             kf.set_string('Paths', 'Roots', entries['Roots'].get_text().trim());
             kf.set_string('Player', 'Play', entries['Play'].get_text().trim());
             kf.set_string('Player', 'Enqueue', entries['Enqueue'].get_text().trim());
+            kf.set_string('Player', 'DefaultAction', comboAction.get_active() === 1 ? 'enqueue' : 'play');
             kf.set_boolean('Player', 'MultipleTracksUseM3U', chkM3U.get_active());
             kf.set_integer('Scan', 'MaxTrackCount', parseInt(entries['MaxTrackCount'].get_text(), 10) || 20000);
             kf.set_integer('Scan', 'LogEvery', parseInt(entries['LogEvery'].get_text(), 10) || 500);
-            try { GLib.file_set_contents(CONFIG_FILE, kf.to_data()); } catch (e) {}
+            saveFileUtf8(CONFIG_FILE, kf.to_data());
 
             try { keyfile.load_from_file(CONFIG_FILE, GLib.KeyFileFlags.NONE); } catch (e) {}
             ROOTS.length = 0;

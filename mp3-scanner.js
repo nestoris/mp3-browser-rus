@@ -766,68 +766,127 @@ if (isMain && typeof ARGV !== 'undefined' && ARGV.length > 0) {
             System.exit(1);
         }
     }
-    else if (command === 'cache') {
+    else if (command === 'cacheforce') {
         const root = ARGV[1];
-        if (!root) { print('Usage: gjs mp3-scanner.js cache <dir>'); System.exit(1); }
+        if (!root) { print('Usage: gjs mp3-scanner.js cacheforce <dir>'); System.exit(1); }
         
-        const loop = new GLib.MainLoop(null, false);
         const absRoot = GLib.canonicalize_filename(root, GLib.get_current_dir());
+        const loop = new GLib.MainLoop(null, false);
         print(`Scanning ${absRoot}...`);
         
         scanDirectory(absRoot, (count) => { if (count % 100 === 0) print(`  ...${count} files`); })
             .then(tree => {
-                function toRelative(node) {
-                    if (Array.isArray(node)) return node.map(f => getRelativePath(absRoot, f));
-                    if (node && typeof node === 'object') {
-                        const out = {};
-                        for (const k in node) out[k] = toRelative(node[k]);
-                        return out;
+                function toRel(n) {
+                    if (Array.isArray(n)) return n.map(p => getRelativePath(absRoot, p));
+                    if (n && typeof n === 'object') {
+                        const out = {}; for (const k in n) out[k] = toRel(n[k]); return out;
                     }
-                    return node;
+                    return n;
                 }
-                const relTree = toRelative(tree);
+                const relTree = toRel(tree);
                 const fileCache = GLib.build_filenamev([absRoot, 'mp3-file-cache.json']);
                 GLib.file_set_contents(fileCache, JSON.stringify(relTree, null, 2));
                 print(`Saved: ${fileCache}`);
-
-                print(`Reading tags...`);
+                
+                print(`Reading ALL tags (force)...`);
                 const tagCache = {};
-                function extractPaths(node) {
-                    if (Array.isArray(node)) return node;
-                    if (node && typeof node === 'object') {
-                        let res = [];
-                        for (const k in node) res = res.concat(extractPaths(node[k]));
-                        return res;
+                function extractPaths(n) {
+                    if (Array.isArray(n)) return n;
+                    if (n && typeof n === 'object') {
+                        let res = []; for (const k in n) res = res.concat(extractPaths(n[k])); return res;
                     }
                     return [];
                 }
-                const allPaths = extractPaths(relTree);
-                let tIdx = 0;
-                
-                const readTagsIdle = () => {
+                const relPaths = extractPaths(relTree);
+                let idx = 0;
+                const idle = () => {
                     const start = Date.now();
-                    while (tIdx < allPaths.length) {
-                        const rel = allPaths[tIdx];
-                        const abs = getAbsolutePath(absRoot, rel);
-                        tagCache[rel] = readTags(abs);
-                        tIdx++;
+                    while (idx < relPaths.length) {
+                        const rel = relPaths[idx];
+                        tagCache[rel] = readTags(getAbsolutePath(absRoot, rel));
+                        idx++;
+                        if (idx % 500 === 0) print(`  Прочитано ${idx} из ${relPaths.length}...`);
                         if (Date.now() - start > 100) break;
                     }
-                    if (tIdx >= allPaths.length) {
-                        const tagCacheFile = GLib.build_filenamev([absRoot, 'mp3-tag-cache.json']);
-                        GLib.file_set_contents(tagCacheFile, JSON.stringify(tagCache, null, 2));
-                        print(`Saved: ${tagCacheFile}`);
-                        loop.quit();
-                        return GLib.SOURCE_REMOVE;
+                    if (idx >= relPaths.length) {
+                        GLib.file_set_contents(GLib.build_filenamev([absRoot, 'mp3-tag-cache.json']),
+                                               JSON.stringify(tagCache, null, 2));
+                        print(`Done. Saved mp3-tag-cache.json`);
+                        loop.quit(); return GLib.SOURCE_REMOVE;
                     }
                     return GLib.SOURCE_CONTINUE;
                 };
-                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, readTagsIdle);
+                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, idle);
             })
-            .catch(e => {
-                log('error', e.message);
-                loop.quit();
-            });
+            .catch(e => { log('error', e.message); loop.quit(); });
+        loop.run();
+    }
+    else if (command === 'cache') {
+        const root = ARGV[1];
+        if (!root) { print('Usage: gjs mp3-scanner.js cache <dir>'); System.exit(1); }
+        
+        const absRoot = GLib.canonicalize_filename(root, GLib.get_current_dir());
+        const loop = new GLib.MainLoop(null, false);
+        print(`Scanning ${absRoot}...`);
+        
+        scanDirectory(absRoot, (count) => { if (count % 100 === 0) print(`  ...${count} files`); })
+            .then(tree => {
+                function toRel(n) {
+                    if (Array.isArray(n)) return n.map(p => getRelativePath(absRoot, p));
+                    if (n && typeof n === 'object') {
+                        const out = {}; for (const k in n) out[k] = toRel(n[k]); return out;
+                    }
+                    return n;
+                }
+                const relTree = toRel(tree);
+                const fileCache = GLib.build_filenamev([absRoot, 'mp3-file-cache.json']);
+                GLib.file_set_contents(fileCache, JSON.stringify(relTree, null, 2));
+                print(`Saved: ${fileCache}`);
+                
+                // Загружаем существующий кэш тегов (apply-логика)
+                const tagCacheFile = GLib.build_filenamev([absRoot, 'mp3-tag-cache.json']);
+                let tagCache = {};
+                if (GLib.file_test(tagCacheFile, GLib.FileTest.EXISTS)) {
+                    const [ok, data] = GLib.file_get_contents(tagCacheFile);
+                    if (ok) try { tagCache = JSON.parse(ByteArray.toString(data)); } catch (e) {}
+                }
+                
+                function extractPaths(n) {
+                    if (Array.isArray(n)) return n;
+                    if (n && typeof n === 'object') {
+                        let res = []; for (const k in n) res = res.concat(extractPaths(n[k])); return res;
+                    }
+                    return [];
+                }
+                const allRel = extractPaths(relTree);
+                const newRel = allRel.filter(rel => tagCache[rel] === undefined);
+                
+                if (newRel.length === 0) {
+                    print(`No new files. Cache already has ${Object.keys(tagCache).length} entries.`);
+                    loop.quit(); return;
+                }
+                
+                print(`Found ${newRel.length} new files (of ${allRel.length}). Reading ID3 (apply)...`);
+                let idx = 0;
+                const idle = () => {
+                    const start = Date.now();
+                    while (idx < newRel.length) {
+                        const rel = newRel[idx];
+                        tagCache[rel] = readTags(getAbsolutePath(absRoot, rel));
+                        idx++;
+                        if (idx % 500 === 0 || idx === newRel.length) print(`  Прочитано ${idx} из ${newRel.length}...`);
+                        if (Date.now() - start > 100) break;
+                    }
+                    if (idx >= newRel.length) {
+                        GLib.file_set_contents(tagCacheFile, JSON.stringify(tagCache, null, 2));
+                        print(`Done. Updated mp3-tag-cache.json`);
+                        loop.quit(); return GLib.SOURCE_REMOVE;
+                    }
+                    return GLib.SOURCE_CONTINUE;
+                };
+                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, idle);
+            })
+            .catch(e => { log('error', e.message); loop.quit(); });
         loop.run();
     }
         else if (command === 'apply') {
@@ -903,7 +962,8 @@ if (isMain && typeof ARGV !== 'undefined' && ARGV.length > 0) {
         print(`  test <file.mp3>          - print ID3 tags for one file as JSON`);
         print(`  scan <dir> [out.json]    - scan a directory and save its tree to a JSON file`);
         print(`  tags <in.json> [out.json]- read ID3 tags for all files in a tree JSON and save to another JSON`);
-        print(`  cache <dir>              - scan a directory and create mp3-file-cache.json and mp3-tag-cache.json inside it`);
+        print(`  cache <dir>              - scan + apply: read ID3 only for new files`);
+        print(`  cacheforce <dir>         - scan + tags : read ID3 for ALL files (long!)`);
         print(`  apply <in.json> <out.json> - add tags ONLY for new files in in.json that are missing in out.json`);
         System.exit(0);
     } else {
