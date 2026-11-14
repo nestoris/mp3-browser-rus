@@ -48,6 +48,13 @@ let scriptDir = GLib.get_current_dir();
 try {
     let progPath = System.programPath || System.programInvocationName;
     if (progPath && progPath.includes('/')) {
+        // Разрешаем симлинк, чтобы найти реальный каталог скрипта
+        let file = Gio.File.new_for_path(progPath);
+        let info = file.query_info('standard::symlink-target',
+                                   Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
+        if (info.get_is_symlink()) {
+            progPath = info.get_symlink_target();
+        }
         scriptDir = GLib.path_get_dirname(GLib.canonicalize_filename(progPath, GLib.get_current_dir()));
     }
 } catch (e) {}
