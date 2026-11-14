@@ -48,9 +48,9 @@ let scriptDir = GLib.get_current_dir();
 try {
     let progPath = System.programPath || System.programInvocationName;
     if (progPath && progPath.includes('/')) {
-        // Разрешаем симлинк, чтобы найти реальный каталог скрипта
+        // Запрашиваем ОБА атрибута: является ли симлинком и куда он указывает
         let file = Gio.File.new_for_path(progPath);
-        let info = file.query_info('standard::symlink-target',
+        let info = file.query_info('standard::is-symlink,standard::symlink-target',
                                    Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
         if (info.get_is_symlink()) {
             progPath = info.get_symlink_target();
