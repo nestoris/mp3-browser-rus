@@ -11,6 +11,39 @@ const Gio       = imports.gi.Gio;
 const ByteArray = imports.byteArray;
 const System    = imports.system;
 
+// ============================================================
+//  DEBUG INFRASTRUCTURE
+// ============================================================
+let DEBUG = false;
+let DEBUG_LOG_HANDLE = null;
+const DEBUG_LOG_FILE = GLib.build_filenamev([GLib.get_user_cache_dir(), 'mp3-browser', 'debug.log']);
+
+for (const a of ARGV) {
+    if (a === '--debug' || a === '-d') DEBUG = true;
+}
+
+function debugInit() {
+    if (!DEBUG) return;
+    try {
+        GLib.mkdir_with_parents(GLib.path_get_dirname(DEBUG_LOG_FILE), 0o755);
+        DEBUG_LOG_HANDLE = Gio.File.new_for_path(DEBUG_LOG_FILE)
+            .replace(null, false, Gio.FileCreateFlags.REPLACE_DESTINATION, null);
+    } catch (e) { DEBUG_LOG_HANDLE = null; }
+    debugLog('=== SESSION START ===');
+    try { debugLog(`GJS version: ${System.version || '?'}`); } catch (e) {}
+    try { debugLog(`programPath: ${System.programPath || '?'}`); } catch (e) {}
+    try { debugLog(`GTK: ${Gtk.get_major_version()}.${Gtk.get_minor_version()}.${Gtk.get_micro_version()}`); } catch (e) {}
+}
+
+function debugLog(msg) {
+    if (!DEBUG) return;
+    const line = `[${new Date().toISOString()}] ${msg}\n`;
+    if (DEBUG_LOG_HANDLE) {
+        try { DEBUG_LOG_HANDLE.write_all(line, null); } catch (e) {}
+    }
+    printerr(`[debug] ${msg}`);
+}
+
 let scriptDir = GLib.get_current_dir();
 try {
     let progPath = System.programPath || System.programInvocationName;
@@ -32,17 +65,27 @@ for (const arg of ARGV) {
 }
 Gtk.init(null);
 
+debugInit();
+
 /* ============================================================
  *  Вспомогательные функции
  * ============================================================ */
-function unwrapIter(r) {
-    if (r === null || r === undefined || r === false) return null;
-    if (Array.isArray(r) && r.length === 2 && typeof r[0] === 'boolean') return r[0] ? r[1] : null;
+function getTreeIter(r) {
+    if (r === null || r === undefined || r === false || r === true) return null;
+    if (Array.isArray(r)) {
+        if (r.length === 2 && typeof r[0] === 'boolean') return r[0] ? r[1] : null;
+        if (r.length === 1) return r[0];
+        if (r.length === 2) return r[1];
+    }
     return r;
 }
-function unwrapNext(model, iter) {
+
+function getNextIter(model, iter) {
     const r = model.iter_next(iter);
-    if (Array.isArray(r) && typeof r[0] === 'boolean') return r[0] ? r[1] : null;
+    // Современный GJS: [bool, iter]. Старый GJS/CJS: bool + in-place.
+    if (Array.isArray(r) && typeof r[0] === 'boolean') {
+        return r[0] ? r[1] : null;
+    }
     return r ? iter : null;
 }
 function getSelected(selection) {
@@ -111,32 +154,71 @@ function popupMenuAtPointer(menu) {
     if (typeof menu.popup_at_pointer === 'function') menu.popup_at_pointer(null);
     else menu.popup(null, null, null, 0, 0);
 }
-function getSelectedTracks(treeView, model) {
-    const selected = [];
-    treeView.get_selection().selected_foreach((m, path, iter) => {
-        if (!iter) iter = unwrapIter(model.get_iter(path));
-        if (iter) {
+function _modelToTracks(model, onlySelected, treeView) {
+    const tracks = [];
+    if (onlySelected && treeView) {
+        treeView.get_selection().selected_foreach((m, path, iter) => {
+            if (!iter) iter = getTreeIter(model.get_iter(path));
+            if (!iter) return;
             const name = model.get_value(iter, 0);
             const file = model.get_value(iter, 1);
             const dir  = model.get_value(iter, 2);
-            const fullPath = dir.endsWith('/') ? dir + file : dir + '/' + file;
-            selected.push({ name, path: fullPath });
-        }
-    });
-    return selected;
+            tracks.push({ name, path: dir.endsWith('/') ? dir + file : dir + '/' + file });
+        });
+    } else {
+        model.foreach((m, path, iter) => {
+            if (!iter) return;
+            const name = model.get_value(iter, 0);
+            const file = model.get_value(iter, 1);
+            const dir  = model.get_value(iter, 2);
+            tracks.push({ name, path: dir.endsWith('/') ? dir + file : dir + '/' + file });
+        });
+    }
+    return tracks;
 }
 
+function getSelectedTracks(treeView, model) {
+    return _modelToTracks(model, true, treeView);
+}
 function getAllTracksFromFileList() {
-    const tracks = [];
-    fileListStore.foreach((model, path, iter) => {
-        if (!iter) return;
-        const name = fileListStore.get_value(iter, 0);
-        const file = fileListStore.get_value(iter, 1);
-        const dir  = fileListStore.get_value(iter, 2);
-        const fullPath = dir.endsWith('/') ? dir + file : dir + '/' + file;
-        tracks.push({ name, path: fullPath });
+    return _modelToTracks(fileListStore, false, null);
+}
+function getPlaylistTracksInDisplayOrder(plName) {
+    const [pmodel, piter] = getSelected(playlistTree.get_selection());
+    const isDisplayed = piter && pmodel.get_value(piter, 0) === plName;
+
+    if (isDisplayed) {
+        // Этот плейлист уже отрисован в правой таблице — берём как есть
+        const tracks = [];
+        playlistContentStore.foreach((m, path, iter) => {
+            if (!iter) return;
+            const name = playlistContentStore.get_value(iter, 0);
+            const file = playlistContentStore.get_value(iter, 1);
+            const dir  = playlistContentStore.get_value(iter, 2);
+            tracks.push({ name, path: dir.endsWith('/') ? dir + file : dir + '/' + file });
+        });
+        return tracks;
+    }
+
+    // Fallback: плейлист не открыт — сортируем PLAYLIST_DATA по правилам этого плейлиста
+    const files = PLAYLIST_DATA.get(plName) || [];
+    const ps = PLAYLIST_SORT.get(plName) || { sortId: -1, sortOrder: 0 };
+    if (ps.sortId < 0) return files.map(f => ({ name: f.name, path: f.path }));
+
+    const rows = files.map(f => {
+        const rel = getRelativePath(activeRootPath, f.path);
+        const t = DISK_TAG_CACHE[rel] || {};
+        return [
+            t.Name || f.name,
+            GLib.path_get_basename(f.path),
+            GLib.path_get_dirname(f.path) + '/',
+            t.Track ? String(t.Track) : '',
+            t.Year || '', t.Genre || '', t.Artist || '', t.Album || '',
+            f.path
+        ];
     });
-    return tracks;
+    const sorted = sortRowsInJs(rows, ps.sortId, ps.sortOrder);
+    return sorted.map(r => ({ name: r[0], path: r[8] }));
 }
 
 function setupSelectionBlocking(view) {
@@ -269,11 +351,13 @@ win.connect('configure-event', (w, event) => {
     return false;
 });
 win.connect('destroy', () => {
-    winConfig.hpaned = hpaned.get_position(); winConfig.vpaned = vpaned.get_position();
+    winConfig.hpaned = hpaned.get_position();
+    winConfig.vpaned = vpaned.get_position();
     winConfig.collection = combo.get_active();
-    winConfig.fileCols = getColumnConfig(fileListTree, fileListStore); winConfig.playlistCols = getColumnConfig(playlistContentTree, playlistContentStore);
+    winConfig.fileCols = getColumnConfig(fileListTree, winConfig.fileCols);
+    winConfig.playlistCols = getColumnConfig(playlistContentTree, winConfig.playlistCols);
     saveFileUtf8(WINDOW_FILE, JSON.stringify(winConfig, null, 2));
-    savePlaylists(); 
+    savePlaylists();
     if (tagCacheSaveTimer) { GLib.source_remove(tagCacheSaveTimer); tagCacheSaveTimer = 0; }
     saveTagCache();
     Gtk.main_quit();
@@ -352,11 +436,11 @@ function subtreeHasMatchingFile(node, text) {
     return false;
 }
 function hasMatchingDescendant(model, iter) {
-    let child = unwrapIter(model.iter_children(iter));
+    let child = getTreeIter(model.iter_children(iter));
     while (child) {
         if (matchesSelf(model, child)) return true;
         if (hasMatchingDescendant(model, child)) return true;
-        child = unwrapNext(model, child);
+        child = getNextIter(model, child);
     }
     return false;
 }
@@ -391,66 +475,83 @@ treeView.connect('drag-begin', (w, ctx) => {
     }
 });
 treeView.connect('drag-data-get', (w, ctx, sel, info, time) => {
-    const tracks = [];
+    // 1. Собираем порядок отображения из правой таблицы (то, что видит пользователь)
+    const orderedEntries = [];          // [{name, path}] в порядке таблицы
+    const orderIndex = new Map();       // path -> index
+    fileListStore.foreach((model, path, iter) => {
+        if (!iter) return;
+        const name = fileListStore.get_value(iter, 0);
+        const file = fileListStore.get_value(iter, 1);
+        const dir  = fileListStore.get_value(iter, 2);
+        const fullPath = dir.endsWith('/') ? dir + file : dir + '/' + file;
+        orderIndex.set(fullPath, orderedEntries.length);
+        orderedEntries.push({ name, path: fullPath });
+    });
+
+    // 2. Собираем выделенные папки, сортируем треки каждой по порядку таблицы
+    const folders = [];
+    const allPaths = new Set();
     w.get_selection().selected_foreach((model, path, iter) => {
         const tcPath = model.get_value(iter, TC_PATH);
         const node = nodesByPath.get(tcPath);
-        if (node) {
-            const files = [];
-            collectFilesFromNode(node, files);
-            for (const f of files) tracks.push({ name: f.name, path: f.path });
-        }
+        if (!node) return;
+        const files = [];
+        collectFilesFromNode(node, files);
+        const rawTracks = files.map(f => ({ name: f.name, path: f.path }));
+        for (const t of rawTracks) allPaths.add(t.path);
+
+        // Сортируем треки этой папки по порядку из правой таблицы
+        const folderTracks = rawTracks.slice().sort((a, b) => {
+            const ia = orderIndex.has(a.path) ? orderIndex.get(a.path) : Infinity;
+            const ib = orderIndex.has(b.path) ? orderIndex.get(b.path) : Infinity;
+            if (ia !== ib) return ia - ib;
+            if (a.path < b.path) return -1;
+            if (a.path > b.path) return 1;
+            return 0;
+        });
+        folders.push({ name: node.name, path: node.path, tracks: folderTracks });
     });
-    if (tracks.length > 0) sel.set_text(JSON.stringify(tracks), -1);
+
+    // 3. Собираем общий список всех уникальных треков в порядке правой таблицы
+    const seen = new Set();
+    const tracks = [];
+    for (const entry of orderedEntries) {
+        if (allPaths.has(entry.path) && !seen.has(entry.path)) {
+            seen.add(entry.path);
+            tracks.push(entry);
+        }
+    }
+    // Добиваем остатком — треками из папок, которых не было в таблице
+    for (const folder of folders) {
+        for (const t of folder.tracks) {
+            if (!seen.has(t.path)) {
+                seen.add(t.path);
+                tracks.push(t);
+            }
+        }
+    }
+
+    if (tracks.length > 0) {
+        sel.set_text(JSON.stringify({ tracks: tracks, folders: folders }), -1);
+    }
 });
 
 const vpaned = new Gtk.Paned({ orientation: Gtk.Orientation.VERTICAL }); vpaned.set_position(winConfig.vpaned); hpaned.pack2(vpaned, true, false);
 
 /* ---- Верхняя таблица файлов ---- */
-function trackNumberCompare(model, iter1, iter2, user_data) {
-    const it1 = (Array.isArray(iter1) && iter1.length === 2) ? iter1[1] : iter1;
-    const it2 = (Array.isArray(iter2) && iter2.length === 2) ? iter2[1] : iter2;
-    if (!it1 || !it2) return 0;
-    const v1 = model.get_value(it1, 3) || '';
-    const v2 = model.get_value(it2, 3) || '';
-    if (v1 === '' && v2 === '') return 0;
-    if (v1 === '') return 1;
-    if (v2 === '') return -1;
-    const n1 = parseInt(v1, 10); const n2 = parseInt(v2, 10);
-    if (!isNaN(n1) && !isNaN(n2)) return n1 - n2;
-    if (v1 < v2) return -1; if (v1 > v2) return 1; return 0;
-}
-
-function albumCompoundSort(model, iter1, iter2, user_data) {
-    const it1 = (Array.isArray(iter1) && iter1.length === 2) ? iter1[1] : iter1;
-    const it2 = (Array.isArray(iter2) && iter2.length === 2) ? iter2[1] : iter2;
-    if (!it1 || !it2) return 0;
-    const alb1 = model.get_value(it1, 7) || '';
-    const alb2 = model.get_value(it2, 7) || '';
-    const byAlbum = alb1.localeCompare(alb2);
-    if (byAlbum !== 0) return byAlbum;
-    const t1 = model.get_value(it1, 3) || '';
-    const t2 = model.get_value(it2, 3) || '';
-    if (t1 === '' && t2 === '') { /* fallthrough to title */ }
-    else if (t1 === '') return 1;
-    else if (t2 === '') return -1;
-    else {
-        const n1 = parseInt(t1, 10); const n2 = parseInt(t2, 10);
-        if (!isNaN(n1) && !isNaN(n2) && n1 !== n2) return n1 - n2;
-    }
-    const title1 = model.get_value(it1, 0) || '';
-    const title2 = model.get_value(it2, 0) || '';
-    return title1.localeCompare(title2);
-}
-
 const fileListStore = Gtk.ListStore.new([...FILE_COLS.map(() => GObject.TYPE_STRING), GObject.TYPE_STRING]);
-fileListStore.set_sort_func(3, trackNumberCompare);
-fileListStore.set_sort_func(7, albumCompoundSort);
 const fileListTree = new Gtk.TreeView({ model: fileListStore });
 FILE_COLS.forEach((title, idx) => {
-    const col = new Gtk.TreeViewColumn({ title, sort_column_id: idx });
-    const rend = new Gtk.CellRendererText(); col.pack_start(rend, true); col.add_attribute(rend, 'text', idx);
-    col.set_resizable(true); col.set_min_width(50); col.set_reorderable(true); fileListTree.append_column(col);
+    const col = new Gtk.TreeViewColumn({ title });
+    col.set_clickable(true);
+    col.set_resizable(true);
+    col.set_min_width(50);
+    col.set_reorderable(true);
+    col.connect('clicked', () => handleFileColumnClick(idx));
+    const rend = new Gtk.CellRendererText();
+    col.pack_start(rend, true);
+    col.add_attribute(rend, 'text', idx);
+    fileListTree.append_column(col);
 });
 fileListTree.set_grid_lines(Gtk.TreeViewGridLines.HORIZONTAL); fileListTree.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE);
 setupSelectionBlocking(fileListTree);
@@ -485,6 +586,45 @@ const playlistStore = Gtk.TreeStore.new([GObject.TYPE_STRING]);
 const playlistTree = new Gtk.TreeView({ model: playlistStore }); playlistTree.set_headers_visible(false);
 const plCol = new Gtk.TreeViewColumn(); const plRend = new Gtk.CellRendererText();
 plCol.pack_start(plRend, true); plCol.add_attribute(plRend, 'text', 0); playlistTree.append_column(plCol);
+// DnD: перетаскивание папок из дерева в список плейлистов => создаём новые плейлисты
+playlistTree.drag_dest_set(Gtk.DestDefaults.ALL,
+    [Gtk.TargetEntry.new('text/plain', 0, 0)], Gdk.DragAction.COPY);
+
+playlistTree.connect('drag-data-received', (w, ctx, x, y, sel, info, time) => {
+    const text = sel.get_text();
+    if (!text) { Gtk.drag_finish(ctx, false, false, time); return; }
+
+    let folders = [];
+    try {
+        const parsed = JSON.parse(text);
+        if (parsed && parsed.folders && Array.isArray(parsed.folders)) folders = parsed.folders;
+        else if (parsed && parsed.path) folders = [{ name: GLib.path_get_basename(parsed.path), tracks: [parsed] }];
+    } catch (e) {}
+    if (folders.length === 0) { Gtk.drag_finish(ctx, false, false, time); return; }
+
+    let lastIter = null;
+    for (const folder of folders) {
+        const baseName = folder.name || 'Плейлист';
+        let uniqueName = baseName, n = 1;
+        while (PLAYLIST_DATA.has(uniqueName)) uniqueName = `${baseName} (${n++})`;
+        PLAYLIST_DATA.set(uniqueName, (folder.tracks || []).map(t => ({ name: t.name, path: t.path })));
+        // Наследуем сортировку файловой таблицы — плейлист будет отображаться в том же порядке
+        PLAYLIST_SORT.set(uniqueName, {
+            sortId: winConfig.fileCols ? winConfig.fileCols.sortId : -1,
+            sortOrder: winConfig.fileCols ? winConfig.fileCols.sortOrder : 0
+        });
+        const iter = getTreeIter(playlistStore.append(null));
+        if (iter) {
+            playlistStore.set(iter, [0], [uniqueName]);
+            lastIter = iter;
+        }
+    }
+    savePlaylists();
+    if (lastIter) {
+        try { playlistTree.get_selection().select_iter(lastIter); } catch (e) {}
+    }
+    Gtk.drag_finish(ctx, true, false, time);
+});
 const playlistScroll = new Gtk.ScrolledWindow(); playlistScroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC); playlistScroll.add(playlistTree);
 playlistsBox.pack_start(playlistScroll, true, true, 0);
 
@@ -496,13 +636,20 @@ for (const b of [btnAdd, btnDel, btnUp, btnDown]) plBtnBox.pack_start(b, true, t
 playlistsBox.pack_start(plBtnBox, false, false, 0); bottomPaned.pack1(playlistsBox, false, false);
 
 const playlistContentStore = Gtk.ListStore.new([...FILE_COLS.map(() => GObject.TYPE_STRING), GObject.TYPE_STRING]);
-playlistContentStore.set_sort_func(3, trackNumberCompare);
-playlistContentStore.set_sort_func(7, albumCompoundSort);
+//playlistContentStore.set_sort_func(3, trackNumberCompare);
+//playlistContentStore.set_sort_func(7, albumCompoundSort);
 const playlistContentTree = new Gtk.TreeView({ model: playlistContentStore });
 FILE_COLS.forEach((title, idx) => {
-    const col = new Gtk.TreeViewColumn({ title, sort_column_id: idx });
-    const rend = new Gtk.CellRendererText(); col.pack_start(rend, true); col.add_attribute(rend, 'text', idx);
-    col.set_resizable(true); col.set_min_width(50); col.set_reorderable(true); playlistContentTree.append_column(col);
+    const col = new Gtk.TreeViewColumn({ title });
+    col.set_clickable(true);
+    col.set_resizable(true);
+    col.set_min_width(50);
+    col.set_reorderable(true);
+    col.connect('clicked', () => handlePlaylistColumnClick(idx));
+    const rend = new Gtk.CellRendererText();
+    col.pack_start(rend, true);
+    col.add_attribute(rend, 'text', idx);
+    playlistContentTree.append_column(col);
 });
 playlistContentTree.set_grid_lines(Gtk.TreeViewGridLines.HORIZONTAL); playlistContentTree.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE);
 setupSelectionBlocking(playlistContentTree); playlistContentTree.set_reorderable(true); playlistContentTree.drag_dest_add_text_targets();
@@ -523,16 +670,19 @@ playlistTableBox.pack_start(playlistToolbar, false, false, 0); bottomPaned.pack2
 /* ============================================================
  *  Применение сохранённых настроек колонок
  * ============================================================ */
-function getColumnConfig(treeView, model) {
-    const cols = treeView.get_columns(); const order = cols.map(c => c.get_title()); const widths = {};
+function getColumnConfig(treeView, existing) {
+    const cols = treeView.get_columns();
+    const order = cols.map(c => c.get_title());
+    const widths = {};
     cols.forEach(c => widths[c.get_title()] = c.get_width());
-    let sortId = -1, sortOrder = 0;
-    if (model) {
-        const s = model.get_sort_column_id();
-        if (s && Array.isArray(s) && typeof s[0] === 'boolean' && s[0]) { sortId = s[1]; sortOrder = s[2]; }
-    }
-    return { order, widths, sortId, sortOrder };
+    return {
+        order,
+        widths,
+        sortId: existing ? existing.sortId : -1,
+        sortOrder: existing ? existing.sortOrder : 0
+    };
 }
+
 function applyColumnConfig(treeView, model, config) {
     if (!config) return;
     const cols = treeView.get_columns(); const colMap = {};
@@ -541,10 +691,77 @@ function applyColumnConfig(treeView, model, config) {
     order.forEach(title => { const c = colMap[title]; if (c) { treeView.remove_column(c); treeView.append_column(c); } });
     const widths = config.widths || {};
     for (const title in widths) { if (colMap[title]) colMap[title].set_fixed_width(widths[title]); }
-    if (config.sortId !== undefined && config.sortId >= 0) model.set_sort_column_id(config.sortId, config.sortOrder);
+    // Сортировка управляется вручную через _batchInsert. Gtk-сортировку не включаем,
+    // чтобы не срабатывал sort_func на невалидных итераторах.
 }
 applyColumnConfig(fileListTree, fileListStore, winConfig.fileCols);
 applyColumnConfig(playlistContentTree, playlistContentStore, winConfig.playlistCols);
+
+function handleFileColumnClick(modelIdx) {
+    if (!winConfig.fileCols) winConfig.fileCols = { sortId: -1, sortOrder: 0 };
+    if (winConfig.fileCols.sortId === modelIdx) {
+        winConfig.fileCols.sortOrder = (winConfig.fileCols.sortOrder === Gtk.SortType.DESCENDING)
+            ? Gtk.SortType.ASCENDING : Gtk.SortType.DESCENDING;
+    } else {
+        winConfig.fileCols.sortId = modelIdx;
+        winConfig.fileCols.sortOrder = Gtk.SortType.ASCENDING;
+    }
+    updateFileSortIndicators();
+    refreshFileListFromSelection();
+}
+
+function handlePlaylistColumnClick(modelIdx) {
+    const [pmodel, piter] = getSelected(playlistTree.get_selection());
+    if (!piter) return;
+    const plName = pmodel.get_value(piter, 0);
+    const cur = PLAYLIST_SORT.get(plName) || { sortId: -1, sortOrder: 0 };
+    let newOrder = Gtk.SortType.ASCENDING;
+    if (cur.sortId === modelIdx && cur.sortOrder === Gtk.SortType.ASCENDING)
+        newOrder = Gtk.SortType.DESCENDING;
+    PLAYLIST_SORT.set(plName, { sortId: modelIdx, sortOrder: newOrder });
+    showPlaylistContent(plName);
+    savePlaylists();
+}
+
+// ============================================================
+//  Сортировка кликом по заголовку — JS-side
+// ============================================================
+function updateFileSortIndicators() {
+    const sortId = winConfig.fileCols ? winConfig.fileCols.sortId : -1;
+    const sortOrder = winConfig.fileCols ? winConfig.fileCols.sortOrder : 0;
+    const sortTitle = (sortId >= 0 && sortId < FILE_COLS.length) ? FILE_COLS[sortId] : null;
+    for (const c of fileListTree.get_columns()) {
+        if (sortTitle !== null && c.get_title() === sortTitle) {
+            c.set_sort_indicator(true);
+            c.set_sort_order(sortOrder);
+        } else {
+            c.set_sort_indicator(false);
+        }
+    }
+}
+
+function updatePlaylistSortIndicators(plName) {
+    if (!plName) {
+        const [, piter] = getSelected(playlistTree.get_selection());
+        if (piter) plName = playlistStore.get_value(piter, 0);
+    }
+    let ps = plName ? PLAYLIST_SORT.get(plName) : null;
+    if (!ps) ps = { sortId: -1, sortOrder: 0 };
+    const sortTitle = (ps.sortId >= 0 && ps.sortId < FILE_COLS.length) ? FILE_COLS[ps.sortId] : null;
+    for (const c of playlistContentTree.get_columns()) {
+        if (sortTitle !== null && c.get_title() === sortTitle) {
+            c.set_sort_indicator(true);
+            c.set_sort_order(ps.sortOrder);
+        } else {
+            c.set_sort_indicator(false);
+        }
+    }
+}
+
+updateFileSortIndicators();
+updatePlaylistSortIndicators(null);
+
+updatePlaylistSortIndicators();
 
 const statusbar = new Gtk.Statusbar(); const progress = new Gtk.ProgressBar({ width_request: 200, show_text: false });
 progress.set_no_show_all(true); statusbar.pack_end(progress, false, false, 4); vbox.pack_start(statusbar, false, false, 0);
@@ -656,49 +873,66 @@ function saveTagCache() {
     saveFileUtf8(tagCachePath, JSON.stringify(out, null, 2));
 }
 
-function getTagsCached(absPath) {
-    const rel = getRelativePath(activeRootPath, absPath);
-    if (DISK_TAG_CACHE[rel] !== undefined) return DISK_TAG_CACHE[rel];
-    
-    let tags = {};
-    try { tags = Scanner.readTags(absPath); } catch(e) { console.error("Error reading tags", absPath, e); }
-    DISK_TAG_CACHE[rel] = tags;
-    scheduleTagCacheSave();
-    return tags;
-}
-
-const PLAYLIST_DATA = new Map(); let syncingPlaylist = false; let syncTimer = 0;
+const PLAYLIST_DATA = new Map();
+const PLAYLIST_SORT = new Map();   // name → { sortId, sortOrder }
+let syncingPlaylist = false; let syncTimer = 0;
 let playlistLoadGeneration = 0;
 
 function loadPlaylists() {
     PLAYLIST_DATA.clear();
+    PLAYLIST_SORT.clear();
     try {
         const [ok, data] = GLib.file_get_contents(PLAYLISTS_FILE);
-        if (ok) { const obj = JSON.parse(ByteArray.toString(data)); for (const [name, tracks] of Object.entries(obj)) PLAYLIST_DATA.set(name, tracks); }
+        if (ok) {
+            const obj = JSON.parse(ByteArray.toString(data));
+            for (const [name, tracks] of Object.entries(obj)) {
+                if (name === '_sort') continue;
+                PLAYLIST_DATA.set(name, tracks);
+            }
+            if (obj._sort) {
+                for (const [name, s] of Object.entries(obj._sort)) PLAYLIST_SORT.set(name, s);
+            }
+        }
     } catch (e) {}
     playlistStore.clear();
-    for (const [name] of PLAYLIST_DATA) { const iter = playlistStore.append(null); playlistStore.set(iter, [0], [name]); }
+    for (const [name] of PLAYLIST_DATA) {
+        const iter = getTreeIter(playlistStore.append(null));
+        if (iter) playlistStore.set(iter, [0], [name]);
+    }
 }
 function savePlaylists() {
-    const obj = {}; let iter = unwrapIter(playlistStore.get_iter_first());
+    const obj = {}; let iter = getTreeIter(playlistStore.get_iter_first());
     while (iter) {
         const name = playlistStore.get_value(iter, 0);
         obj[name] = (PLAYLIST_DATA.get(name) || []).map(f => ({ name: f.name, path: f.path }));
-        iter = unwrapNext(playlistStore, iter);
+        iter = getNextIter(playlistStore, iter);
+    }
+    if (PLAYLIST_SORT.size > 0) {
+        obj._sort = {};
+        for (const [name, s] of PLAYLIST_SORT) obj._sort[name] = s;
     }
     saveFileUtf8(PLAYLISTS_FILE, JSON.stringify(obj, null, 2));
 }
 function syncPlaylistData() {
     const [pmodel, piter] = getSelected(playlistTree.get_selection());
     if (!piter) return;
-    const plName = pmodel.get_value(piter, 0); const files = [];
-    let iter = unwrapIter(playlistContentStore.get_iter_first());
+    const plName = pmodel.get_value(piter, 0);
+    const files = [];
+    let iter = getTreeIter(playlistContentStore.get_iter_first());
     while (iter) {
-        const name = playlistContentStore.get_value(iter, 0); const file = playlistContentStore.get_value(iter, 1); const dir = playlistContentStore.get_value(iter, 2);
-        const fullPath = dir.endsWith('/') ? dir + file : dir + '/' + file;
-        files.push({ name, path: fullPath }); iter = unwrapNext(playlistContentStore, iter);
+        try {
+            const name = playlistContentStore.get_value(iter, 0);
+            const file = playlistContentStore.get_value(iter, 1);
+            const dir = playlistContentStore.get_value(iter, 2);
+            const fullPath = dir.endsWith('/') ? dir + file : dir + '/' + file;
+            files.push({ name, path: fullPath });
+            iter = getTreeIter(playlistContentStore.iter_next(iter));
+        } catch (e) {
+            break;
+        }
     }
-    PLAYLIST_DATA.set(plName, files); savePlaylists();
+    PLAYLIST_DATA.set(plName, files);
+    savePlaylists();
 }
 function scheduleSync() {
     if (syncingPlaylist) return;
@@ -710,42 +944,137 @@ function showPlaylistContent(name) {
     playlistLoadGeneration++;
     const gen = playlistLoadGeneration;
     const files = PLAYLIST_DATA.get(name) || [];
-    
-    renderPlaylistContent(files);
+    renderPlaylistContent(name, files);
     startPlaylistTagLoading(gen, name, files);
 }
 
-function renderPlaylistContent(files) {
+function smartCompare(a, b) {
+    const re = /^(\d+)/;
+    const m1 = a.match(re);
+    const m2 = b.match(re);
+    if (m1 && m2) {
+        const n1 = parseInt(m1[1], 10);
+        const n2 = parseInt(m2[1], 10);
+        if (n1 !== n2) return n1 - n2;
+    } else if (m1) return -1;
+    else if (m2) return 1;
+    return a.localeCompare(b);
+}
+
+function sortRowsInJs(rows, sortId, sortOrder) {
+    if (sortId === undefined || sortId < 0) return rows;
+    const copy = rows.slice();
+    copy.sort((a, b) => {
+        let r = 0;
+        if (sortId === 1) {
+            r = smartCompare(a[1] || '', b[1] || '');
+        } else if (sortId === 3) {
+            const n1 = parseInt(a[3], 10), n2 = parseInt(b[3], 10);
+            if (!isNaN(n1) && !isNaN(n2) && n1 !== n2) r = n1 - n2;
+            else if (a[3] === '' && b[3] !== '') r = 1;
+            else if (a[3] !== '' && b[3] === '') r = -1;
+            else if (a[3] < b[3]) r = -1;
+            else if (a[3] > b[3]) r = 1;
+        } else if (sortId === 7) {
+            if (a[7] < b[7]) r = -1;
+            else if (a[7] > b[7]) r = 1;
+            else {
+                const n1 = parseInt(a[3], 10), n2 = parseInt(b[3], 10);
+                if (!isNaN(n1) && !isNaN(n2) && n1 !== n2) r = n1 - n2;
+                else if (a[0] < b[0]) r = -1;
+                else if (a[0] > b[0]) r = 1;
+            }
+        } else {
+            const v1 = a[sortId] || ''; const v2 = b[sortId] || '';
+            if (v1 < v2) r = -1;
+            else if (v1 > v2) r = 1;
+        }
+        return sortOrder === Gtk.SortType.DESCENDING ? -r : r;
+    });
+    return copy;
+}
+
+function _batchInsert(store, sortedRows) {
+    store.clear();
+    for (const values of sortedRows) {
+        try {
+            const iter = getTreeIter(store.append());
+            if (!iter) continue;
+            for (let i = 0; i < values.length; i++) {
+                try { store.set_value(iter, i, values[i]); } catch (e) {}
+            }
+        } catch (e) {}
+    }
+}
+
+function renderFileList(files) {
+    const rows = files.map(f => {
+        const t = f.tags || {};
+        return [
+            t.Name || f.name.replace(/\.mp3$/i, ''),   // 0: Имя
+            GLib.path_get_basename(f.path),            // 1: Файл
+            GLib.path_get_dirname(f.path) + '/',       // 2: Путь
+            t.Track ? String(t.Track) : '',            // 3: №
+            t.Year || '',                              // 4: Дата
+            t.Genre || '',                             // 5: Жанр
+            t.Artist || '',                            // 6: Исполнитель
+            t.Album || '',                             // 7: Альбом
+            f.path                                     // 8: скрытый полный путь
+        ];
+    });
+
+    const fc = winConfig.fileCols || { sortId: -1, sortOrder: 0 };
+    const sortedRows = sortRowsInJs(rows, fc.sortId, fc.sortOrder);
+    _batchInsert(fileListStore, sortedRows);
+    updateFileSortIndicators();
+}
+
+function renderPlaylistContent(name, files) {
     syncingPlaylist = true;
     try {
-        playlistContentStore.clear();
-        let n = 1;
-        for (const f of files) {
+        const rows = files.map(f => {
             const rel = getRelativePath(activeRootPath, f.path);
             const t = DISK_TAG_CACHE[rel] || {};
-            const it = playlistContentStore.append();
-            playlistContentStore.set(it, [0,1,2,3,4,5,6,7,8],
-                [t.Name || f.name, GLib.path_get_basename(f.path), GLib.path_get_dirname(f.path) + '/', 
-                 t.Track ? String(t.Track) : '',
-                 t.Year || '', t.Genre || '', t.Artist || '', t.Album || '', f.path]);
-        }
-    } finally { syncingPlaylist = false; }
+            return [
+                t.Name || f.name,                          // 0: Имя
+                GLib.path_get_basename(f.path),            // 1: Файл
+                GLib.path_get_dirname(f.path) + '/',       // 2: Путь
+                t.Track ? String(t.Track) : '',            // 3: №
+                t.Year || '',                              // 4: Дата
+                t.Genre || '',                             // 5: Жанр
+                t.Artist || '',                            // 6: Исполнитель
+                t.Album || '',                             // 7: Альбом
+                f.path                                     // 8: скрытый полный путь
+            ];
+        });
+
+        const ps = PLAYLIST_SORT.get(name) || { sortId: -1, sortOrder: 0 };
+        const sortedRows = sortRowsInJs(rows, ps.sortId, ps.sortOrder);
+        _batchInsert(playlistContentStore, sortedRows);
+    } finally {
+        syncingPlaylist = false;
+    }
+    updatePlaylistSortIndicators(name);
 }
 
 function updatePlaylistRow(f) {
-    let iter = unwrapIter(playlistContentStore.get_iter_first());
+    let iter = getTreeIter(playlistContentStore.get_iter_first());
     while (iter) {
-        if (playlistContentStore.get_value(iter, 8) === f.path) {
-            const t = f.tags || {};
-            const displayNum = t.Track ? String(t.Track) : '';
-            syncingPlaylist = true;
-            try {
-                playlistContentStore.set(iter, [0, 3, 4, 5, 6, 7],
-                    [t.Name || f.name, displayNum,
-                     t.Year || '', t.Genre || '', t.Artist || '', t.Album || '']);
-            } finally { syncingPlaylist = false; }
+        try {
+            if (playlistContentStore.get_value(iter, 8) === f.path) {
+                const t = f.tags || {};
+                const displayNum = t.Track ? String(t.Track) : '';
+                syncingPlaylist = true;
+                try {
+                    playlistContentStore.set(iter, [0, 3, 4, 5, 6, 7],
+                        [t.Name || f.name, displayNum,
+                         t.Year || '', t.Genre || '', t.Artist || '', t.Album || '']);
+                } finally { syncingPlaylist = false; }
+            }
+            iter = getTreeIter(playlistContentStore.iter_next(iter));
+        } catch (e) {
+            break;
         }
-        iter = unwrapIter(playlistContentStore.iter_next(iter));
     }
 }
 
@@ -786,7 +1115,7 @@ function startPlaylistTagLoading(gen, plName, files) {
             completed++;
             if (completed === total) {
                 if (gen === playlistLoadGeneration) {
-                    renderPlaylistContent(files); // Полная перерисовка с готовыми тегами
+                    renderPlaylistContent(plName, files);
                     scheduleSync();
                 }
             }
@@ -838,8 +1167,10 @@ function exportPlaylistToM3U(plName) {
     dialog.set_current_name(plName + '.m3u8');
     dialog.connect('response', (d, resp) => {
         if (resp === Gtk.ResponseType.OK) {
-            const filePath = d.get_filename(); const tracks = PLAYLIST_DATA.get(plName) || [];
-            let content = '#EXTM3U\n'; for (const t of tracks) content += t.path + '\n';
+            const filePath = d.get_filename();
+            const tracks = getPlaylistTracksInDisplayOrder(plName);
+            let content = '#EXTM3U\n';
+            for (const t of tracks) content += t.path + '\n';
             try { GLib.file_set_contents(filePath, content); } catch (e) {}
         }
         d.destroy();
@@ -1056,35 +1387,22 @@ function collectFilesFromNode(node, out) {
     return out;
 }
 
-function renderFileList(files) {
-    fileListStore.clear();
-    let n = 1;
-    for (const f of files) {
-        const t = f.tags || {};
-        const it = fileListStore.append();
-        fileListStore.set(it, [0,1,2,3,4,5,6,7,8],
-            [t.Name || f.name.replace(/\.mp3$/i, ''), GLib.path_get_basename(f.path), GLib.path_get_dirname(f.path) + '/', t.Track ? String(t.Track) : '',
-             t.Year || '', t.Genre || '', t.Artist || '', t.Album || '', f.path]);
-    }
-    if (winConfig.fileCols && winConfig.fileCols.sortId >= 0) {
-        try { fileListStore.set_sort_column_id(winConfig.fileCols.sortId, winConfig.fileCols.sortOrder); } catch (e) {}
-    } else {
-        try { fileListStore.set_sort_column_id(7, Gtk.SortType.ASCENDING); } catch (e) {}
-    }
-}
-
 function updateFileRow(f) {
-    let iter = unwrapIter(fileListStore.get_iter_first());
+    let iter = getTreeIter(fileListStore.get_iter_first());
     while (iter) {
-        if (fileListStore.get_value(iter, 8) === f.path) {
-            const t = f.tags || {};
-            const displayNum = t.Track ? String(t.Track) : '';
-            fileListStore.set(iter, [0, 3, 4, 5, 6, 7],
-                [t.Name || f.name.replace(/\.mp3$/i, ''), displayNum,
-                 t.Year || '', t.Genre || '', t.Artist || '', t.Album || '']);
+        try {
+            if (fileListStore.get_value(iter, 8) === f.path) {
+                const t = f.tags || {};
+                const displayNum = t.Track ? String(t.Track) : '';
+                fileListStore.set(iter, [0, 3, 4, 5, 6, 7],
+                    [t.Name || f.name.replace(/\.mp3$/i, ''), displayNum,
+                     t.Year || '', t.Genre || '', t.Artist || '', t.Album || '']);
+                break;
+            }
+            iter = getTreeIter(fileListStore.iter_next(iter));
+        } catch (e) {
             break;
         }
-        iter = unwrapIter(fileListStore.iter_next(iter));
     }
 }
 
@@ -1385,6 +1703,31 @@ fileListTree.connect('button-press-event', (w, event) => {
     const tracks = getSelectedTracks(w, fileListStore);
     if (tracks.length === 0) return false;
     const menu = new Gtk.Menu();
+    const miFileSort = new Gtk.MenuItem({ label: 'Сортировать по' });
+    const fileSortSub = new Gtk.Menu();
+    FILE_COLS.forEach((title, idx) => {
+        const it = new Gtk.MenuItem({ label: title });
+        it.connect('activate', () => {
+            if (!winConfig.fileCols) winConfig.fileCols = { sortId: -1, sortOrder: 0 };
+            winConfig.fileCols.sortId = idx;
+            winConfig.fileCols.sortOrder = Gtk.SortType.ASCENDING;
+            updateFileSortIndicators();
+            refreshFileListFromSelection();
+        });
+        fileSortSub.append(it);
+    });
+    fileSortSub.append(new Gtk.SeparatorMenuItem());
+    const miFileSortNone = new Gtk.MenuItem({ label: '(без сортировки)' });
+    miFileSortNone.connect('activate', () => {
+        if (!winConfig.fileCols) winConfig.fileCols = { sortId: -1, sortOrder: 0 };
+        winConfig.fileCols.sortId = -1;
+        updateFileSortIndicators();
+        refreshFileListFromSelection();
+    });
+    fileSortSub.append(miFileSortNone);
+    miFileSort.set_submenu(fileSortSub);
+    menu.append(miFileSort);
+    menu.append(new Gtk.SeparatorMenuItem());
     const miPlay = new Gtk.MenuItem({ label: tracks.length > 1 ? `Проиграть выделенные (${tracks.length})` : 'Проиграть' }); miPlay.connect('activate', () => playTracks(tracks, false)); menu.append(miPlay);
     const miEnq = new Gtk.MenuItem({ label: tracks.length > 1 ? `Добавить в очередь выделенные (${tracks.length})` : 'Добавить в очередь' }); miEnq.connect('activate', () => playTracks(tracks, true)); menu.append(miEnq);
     menu.append(new Gtk.SeparatorMenuItem());
@@ -1401,6 +1744,34 @@ playlistContentTree.connect('button-press-event', (w, event) => {
     const tracks = getSelectedTracks(w, playlistContentStore);
     if (tracks.length === 0) return false;
     const menu = new Gtk.Menu();
+    const miSort = new Gtk.MenuItem({ label: 'Сортировать по' });
+    const sortSub = new Gtk.Menu();
+    FILE_COLS.forEach((title, idx) => {
+        const it = new Gtk.MenuItem({ label: title });
+        it.connect('activate', () => {
+            const [pmodel, piter] = getSelected(playlistTree.get_selection());
+            if (!piter) return;
+            const plName = pmodel.get_value(piter, 0);
+            PLAYLIST_SORT.set(plName, { sortId: idx, sortOrder: Gtk.SortType.ASCENDING });
+            showPlaylistContent(plName);
+            savePlaylists();
+        });
+        sortSub.append(it);
+    });
+    sortSub.append(new Gtk.SeparatorMenuItem());
+    const miSortNone = new Gtk.MenuItem({ label: '(без сортировки)' });
+    miSortNone.connect('activate', () => {
+        const [pmodel, piter] = getSelected(playlistTree.get_selection());
+        if (!piter) return;
+        const plName = pmodel.get_value(piter, 0);
+        PLAYLIST_SORT.delete(plName);
+        showPlaylistContent(plName);
+        savePlaylists();
+    });
+    sortSub.append(miSortNone);
+    miSort.set_submenu(sortSub);
+    menu.append(miSort);
+    menu.append(new Gtk.SeparatorMenuItem());
     const miPlay = new Gtk.MenuItem({ label: tracks.length > 1 ? `Проиграть выделенные (${tracks.length})` : 'Проиграть' }); miPlay.connect('activate', () => playTracks(tracks, false)); menu.append(miPlay);
     const miEnq = new Gtk.MenuItem({ label: tracks.length > 1 ? `Добавить в очередь выделенные (${tracks.length})` : 'Добавить в очередь' }); miEnq.connect('activate', () => playTracks(tracks, true)); menu.append(miEnq);
     menu.append(new Gtk.SeparatorMenuItem());
@@ -1429,8 +1800,10 @@ playlistTree.connect('button-press-event', (w, event) => {
     w.get_selection().select_path(path);
     const [model, iter] = getSelected(w.get_selection());
     if (!iter) return false;
-    const plName = model.get_value(iter, 0); const files = PLAYLIST_DATA.get(plName) || [];
-    const idx = model.get_path(iter).get_indices()[0]; const count = model.iter_n_children(null);
+    const plName = model.get_value(iter, 0);
+    const files = getPlaylistTracksInDisplayOrder(plName);
+    const idx = model.get_path(iter).get_indices()[0];
+    const count = model.iter_n_children(null);
     const menu = new Gtk.Menu();
     const miPlay = new Gtk.MenuItem({ label: `Проиграть (${files.length})` }); miPlay.set_sensitive(files.length > 0); miPlay.connect('activate', () => playTracks(files, false)); menu.append(miPlay);
     const miEnq = new Gtk.MenuItem({ label: `Добавить в очередь (${files.length})` }); miEnq.set_sensitive(files.length > 0); miEnq.connect('activate', () => playTracks(files, true)); menu.append(miEnq);
@@ -1446,14 +1819,22 @@ playlistTree.connect('button-press-event', (w, event) => {
 
 playlistContentTree.connect('drag-data-received', (w, ctx, x, y, sel, info, time) => {
     if (Gtk.drag_get_source_widget(ctx) === w) return;
-    const text = sel.get_text(); if (!text) { Gtk.drag_finish(ctx, false, false, time); return; }
+    const text = sel.get_text();
+    if (!text) { Gtk.drag_finish(ctx, false, false, time); return; }
     const [pmodel, piter] = getSelected(playlistTree.get_selection());
     if (!piter) { Gtk.drag_finish(ctx, false, false, time); return; }
     const plName = pmodel.get_value(piter, 0);
+
+    let tracks = [];
     try {
-        const parsed = JSON.parse(text); const tracks = Array.isArray(parsed) ? parsed : [parsed];
-        for (const t of tracks) { if (t.path) addToPlaylist(plName, t); }
-    } catch (e) { addToPlaylist(plName, { name: GLib.path_get_basename(text), path: text }); }
+        const parsed = JSON.parse(text);
+        if (parsed && parsed.tracks && Array.isArray(parsed.tracks)) tracks = parsed.tracks;
+        else if (Array.isArray(parsed)) tracks = parsed;
+        else if (parsed && parsed.path) tracks = [parsed];
+    } catch (e) {
+        tracks = [{ name: GLib.path_get_basename(text), path: text }];
+    }
+    for (const t of tracks) if (t && t.path) addToPlaylist(plName, t);
     Gtk.drag_finish(ctx, true, false, time);
 });
 
@@ -1469,6 +1850,10 @@ function doRenamePlaylist(model, iter) {
                 const files = PLAYLIST_DATA.get(oldName) || []; PLAYLIST_DATA.delete(oldName); PLAYLIST_DATA.set(newName, files);
                 model.set_value(iter, 0, newName); savePlaylists();
             }
+            if (PLAYLIST_SORT.has(oldName)) {
+                PLAYLIST_SORT.set(newName, PLAYLIST_SORT.get(oldName));
+                PLAYLIST_SORT.delete(oldName);
+            }
         }
         d.destroy();
     });
@@ -1476,22 +1861,28 @@ function doRenamePlaylist(model, iter) {
 function doDeletePlaylist() {
     const [model, iter] = getSelected(playlistTree.get_selection());
     if (!iter) return;
-    const name = model.get_value(iter, 0); PLAYLIST_DATA.delete(name); playlistStore.remove(iter); savePlaylists();
+    const name = model.get_value(iter, 0); PLAYLIST_DATA.delete(name); playlistStore.remove(iter); savePlaylists(); PLAYLIST_SORT.delete(name);
 }
 function doAddPlaylist() {
     const base = 'Новый плейлист'; let unique = base, i = 1;
     while (PLAYLIST_DATA.has(unique)) unique = `${base} ${++i}`;
-    PLAYLIST_DATA.set(unique, []); const iter = playlistStore.append(null);
-    playlistStore.set(iter, [0], [unique]); playlistTree.get_selection().select_iter(iter); savePlaylists();
+    PLAYLIST_DATA.set(unique, []);
+    PLAYLIST_SORT.set(unique, { sortId: -1, sortOrder: 0 });
+    const iter = getTreeIter(playlistStore.append(null));
+    if (iter) {
+        playlistStore.set(iter, [0], [unique]);
+        playlistTree.get_selection().select_iter(iter);
+    }
+    savePlaylists();
 }
 function movePlaylist(delta) {
     const [model, iter] = getSelected(playlistTree.get_selection()); if (!iter) return;
     const idx = model.get_path(iter).get_indices()[0]; const newIdx = idx + delta; const count = model.iter_n_children(null);
     if (newIdx < 0 || newIdx >= count) return;
-    const other = unwrapIter(model.iter_nth_child(null, newIdx)); if (!other) return;
+    const other = getTreeIter(model.iter_nth_child(null, newIdx)); if (!other) return;
     const nameA = model.get_value(iter, 0); const nameB = model.get_value(other, 0);
     model.set_value(iter, 0, nameB); model.set_value(other, 0, nameA);
-    const newIter = unwrapIter(model.iter_nth_child(null, newIdx)); if (newIter) playlistTree.get_selection().select_iter(newIter);
+    const newIter = getTreeIter(model.iter_nth_child(null, newIdx)); if (newIter) playlistTree.get_selection().select_iter(newIter);
     savePlaylists();
 }
 

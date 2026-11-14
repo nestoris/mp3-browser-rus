@@ -220,3 +220,45 @@ Move down
 
  Прочитано ${processed} из ${total}...
  Read ${processed} out of ${total}...
+
+не поддерживается вашей системой:
+is not supported by your system:
+
+Ошибка сохранения ${path}:
+Error saving ${path}:
+
+Перечитать (только новые файлы). SHIFT+клик — перечитать все теги.
+Reload (new files only). SHIFT+click — reload all tags.
+
+Плейлист
+Playlist
+
+${allFiles.length} файлов показано
+${allFiles.length} files shown
+
+Перечитать ID3 всех файлов (${totalFiles})?
+Reload ID3 tags for all files (${totalFiles})?
+
+Это может занять продолжительное время. Продолжить?
+This may take a long time. Continue?
+
+Все теги уже прочитаны
+All tags have already been read
+
+Прочитано ${total} тегов
+${total} tags read
+
+Сортировать по
+Sort by
+
+(без сортировки)
+(no sorting)
+
+Действие Enter / двойной клик:
+Action for Enter / double-click:
+
+  Прочитано ${idx} из ${relPaths.length}...
+  Read ${idx} of ${relPaths.length}...
+
+  Прочитано ${idx} из ${newRel.length}...
+  Read ${idx} of ${newRel.length}...
